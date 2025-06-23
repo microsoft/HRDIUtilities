@@ -1,0 +1,13 @@
+# DO NOT include azure-functions-worker in this file
+# The Python Worker is managed by Azure Functions platform
+# Manually managing azure-functions-worker may cause unexpected issues
+
+azure-functions
+requests
+azure-identity
+azure-purview-scanning
+azure-purview-catalog
+pandas
+jmespath
+urllib3
+azure-storage-file-datalake

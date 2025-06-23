@@ -1,0 +1,19 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+      "SOURCE_PURVIEW_ACCOUNT_NAME": "",
+      "SOURCE_COLLECTION_COMMA_SEPARATED": "",
+      "TARGET_PURVIEW_ACCOUNT_NAME": "",
+      "METADATA_WRITE_BLOB_ACCOUNT": "",
+      "METADATA_WRITE_BLOB_CONTAINER": "",
+      "METADATA_WRITE_BLOB_DIRECTORY": "",
+      "METADATA_READ_BLOB_ACCOUNT": "",
+      "METADATA_READ_BLOB_CONTAINER": "",
+      "METADATA_READ_BLOB_DIRECTORY": "",
+      "METADATA_CAPTURE_CRON": "",
+      "METADATA_PUBLISH_CRON": "",
+      "TARGET_COLLECTION_NAME": ""
+  }
+}
