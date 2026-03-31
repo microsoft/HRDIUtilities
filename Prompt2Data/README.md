@@ -31,7 +31,6 @@ Execute the following command in Copilot Chat:
 ## 🤖 How the Agent Works
 
 Let's trace what happens when you run:
-Workflow Diagram See [prompt2data-workflow-digram.md](prompt2data-workflow-digram.md) for the full Mermaid flowchart, or refer to the diagram below:
 
 ```text
 /prompt2data Generate a dataset for an HR system that captures organizational insights,
@@ -53,7 +52,6 @@ The agent's first task is to analyze your natural-language input and identify th
 
 The agent classifies each entity as either a **lookup/dimension** table (relatively static reference data) or a **fact/transaction** table (event-driven records). This classification determines the generation order — parent tables must be created before child tables to ensure valid foreign keys.
 
-![Domain Analysis](./images/analysis.png)
 
 ### Step 2: Permission Requests
 
@@ -63,7 +61,6 @@ Before creating files or installing packages, the agent prompts for permission. 
 - Installing Python packages (`pandas`, `numpy`, `matplotlib`, `seaborn`, `scipy`)
 - Creating and executing notebook cells
 
-![Permission Prompt](./images/permission.png)
 
 This permission model ensures the agent never takes destructive actions without user consent.
 
@@ -389,48 +386,6 @@ Try these to see the agent's versatility across completely different domains:
 ```
 
 Each prompt produces a completely different set of normalized tables, tailored to the domain described.
-
----
-
-## How to Build Your Own Copilot Agent
-
-Inspired by Prompt2Data? Here's the minimal recipe to create your own VS Code Copilot agent:
-
-### 1. Create the Prompt File
-
-Place a `.prompt.md` file in `.github/prompts/`:
-
-```yaml
----
-description: "What your agent does"
-mode: agent
-tools: ['editFiles', 'runCommands']
----
-
-# Your Agent Name
-
-Your instructions go here. Use ${input:paramName} for user input.
-```
-
-### 2. Add Instruction Files (Optional)
-
-Place `.instructions.md` files in `.github/instructions/` to apply coding standards:
-
-```yaml
----
-applyTo: "**/*.py"
----
-
-# Python Standards
-- Follow PEP 8
-- Use type hints
-```
-
-### 3. Invoke Your Agent
-
-In Copilot Chat, type `/your-agent-name` followed by your input.
-
-That's it. No extension to build, no server to deploy, no API keys to manage. The entire agent is defined in Markdown.
 
 ---
 
