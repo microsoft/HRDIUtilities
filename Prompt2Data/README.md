@@ -31,6 +31,7 @@ Execute the following command in Copilot Chat:
 ## 🤖 How the Agent Works
 
 Let's trace what happens when you run:
+Workflow Diagram See [prompt2data-workflow-digram.md](prompt2data-workflow-digram.md) for the full Mermaid flowchart, or refer to the diagram below:
 
 ```text
 /prompt2data Generate a dataset for an HR system that captures organizational insights,
