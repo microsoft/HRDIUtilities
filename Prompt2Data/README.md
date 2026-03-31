@@ -6,6 +6,32 @@ Prompt2Data is a **custom agent** that generates comprehensive synthetic dataset
 
 ---
 
+# 🚀 Prompt2Data – How to Use
+
+## 📋 Prerequisites
+Before getting started, ensure you have the following set up:
+
+- **VS Code** with the GitHub Copilot and GitHub Copilot Chat extensions installed  
+- A **Python environment** with `pip` available  
+  > *(Required packages will be installed automatically by the agent)*
+
+---
+
+## ⚙️ Step 1: Setup & Run
+
+### 1. Clone the Repository
+```bash
+git clone https://github.com/microsoft/HRDIUtilities/
+### 2. Open the Project
+Navigate to the Prompt2Data folder
+Open it in VS Code
+### 3. Launch Copilot Chat
+Open the GitHub Copilot Chat extension inside VS Code
+4. Run the Agent Command
+Execute the following command in Copilot Chat:
+/prompt2data Generate a dataset for an HR system that captures organizational insights, compensation details, iterative changes, and location-based relationships.
+---
+
 ## Benefits
 
 | Benefit | Details |
