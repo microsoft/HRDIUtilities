@@ -346,33 +346,6 @@ python -m spacy download en_core_web_lg
 
 ## Try It Yourself
 
-### Prerequisites
-
-- **VS Code** with GitHub Copilot and GitHub Copilot Chat extensions installed
-- A **Python environment** with `pip` available (packages are installed automatically)
-
-### Quick Start
-
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/microsoft/HRDIUtilities/
-   ```
-
-2. **Open in VS Code**
-   Navigate to the `Prompt2Data` folder and open it in VS Code.
-
-3. **Open Copilot Chat**
-   Launch the GitHub Copilot Chat panel.
-
-4. **Run the agent**
-   ```text
-   /prompt2data Generate a dataset for an HR system that captures organizational insights,
-   compensation details, iterative changes, and location-based relationships.
-   ```
-
-5. **Explore outputs**
-   Open the generated notebook, review visualizations, tweak parameters, or regenerate.
-
 ### Example Prompts
 
 Try these to see the agent's versatility across completely different domains:
