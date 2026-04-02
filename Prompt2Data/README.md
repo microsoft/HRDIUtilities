@@ -360,8 +360,39 @@ Try these to see the agent's versatility across completely different domains:
 
 Each prompt produces a completely different set of normalized tables, tailored to the domain described.
 
----
+### Conversational Refinement — Updating Entities and Attributes
 
+Prompt2Data isn't limited to one-shot generation. You can have a **multi-turn conversation** to iteratively refine the generated dataset. Here's a full example:
+
+**Turn 1 — Initial generation:**
+```text
+/prompt2data Generate a dataset for an HR system that captures organizational insights,
+compensation details, iterative changes, and location-based relationships.
+```
+> *The agent generates tables: Locations, Departments, Job_Titles, Employees, Compensation, Org_Changes.*
+
+**Turn 2 — Add a new entity:**
+```text
+I also need a Benefits table that tracks health plan enrollments per employee,
+including plan_type, coverage_level, monthly_premium, and enrollment_date.
+```
+> *The agent adds a Benefits entity linked to Employees via employee_id, generates realistic plan data (HMO/PPO/HDHP distributions), and re-validates referential integrity across all tables.*
+
+**Turn 3 — Modify an existing attribute:**
+```text
+Update the Employees table to include a performance_rating column with values 1 through 5,
+where most employees cluster around 3–4 (normal distribution).
+```
+> *The agent modifies the employee generation function, adds the new column with a realistic bell-curve distribution, re-runs the affected cells, and updates the CSV export.*
+
+**Turn 4 — Adjust data volumes:**
+```text
+Increase the employee count to 2000 and make sure compensation records scale proportionally.
+```
+> *The agent updates row counts in the schema definition, regenerates all dependent tables, and re-exports CSVs.*
+
+This conversational workflow lets you start broad and progressively refine until the dataset matches your exact requirements.
+---
 ## Key Design Decisions
 
 ### Why Jupyter Notebooks?
