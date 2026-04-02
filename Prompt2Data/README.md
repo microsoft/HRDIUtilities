@@ -358,6 +358,26 @@ Try these to see the agent's versatility across completely different domains:
 /prompt2data IoT sensor readings from a smart factory
 ```
 
+### Fine-Grained Prompts with Specific Constraints
+
+You can include precise statistical and business constraints directly in your prompt. The agent will honor these instructions when generating data:
+
+```text
+/prompt2data Generate an employee attrition dataset where 50% to 70% of employees
+are active and the rest have exit dates. Salaries should range from $40,000 to $180,000
+with a median around $72,000. Ensure at least 15% of employees are in engineering
+and no department has fewer than 5 people.
+```
+
+```text
+/prompt2data Generate IoT sensor data for a manufacturing plant. 80% to 90% of readings
+should be within normal operating range (temperature 60–80°F, humidity 30–50%).
+Include 5% to 10% anomalous readings that exceed thresholds, and 2% to 5% missing
+values to simulate sensor failures.
+```
+
+These fine-grained instructions give you precise control over distributions, thresholds, and data quality characteristics without writing any code.
+
 Each prompt produces a completely different set of normalized tables, tailored to the domain described.
 
 ### Conversational Refinement — Updating Entities and Attributes
@@ -403,6 +423,8 @@ We chose Jupyter notebooks as the output format for several reasons:
 2. **Documentation built-in** — Markdown cells explain the schema, relationships, and design decisions inline with the code
 3. **Visualizations included** — Charts render directly in the notebook without additional setup
 4. **Iterative exploration** — Users can modify individual cells to adjust distributions, add columns, or change row counts
+5. **Cross-platform compatibility** — The generated notebooks use standard Python libraries (`pandas`, `numpy`, `matplotlib`, `seaborn`, `scipy`) with no VS Code–specific dependencies. This means they can be executed in **Azure Databricks**, **Azure Synapse Analytics**, **Microsoft Fabric**, **Google Colab**, **JupyterHub**, or any other environment that supports Jupyter notebooks. Simply upload the `.ipynb` file and run — no modifications needed.
+
 
 ### Why Multiple CSV Files Instead of One?
 
@@ -425,6 +447,19 @@ The pattern of running each notebook cell immediately after creating it is criti
 
 By executing each cell in sequence, the agent catches errors at the point of creation and can self-correct before moving on.
 
+---
+## Known Limitations
+
+While Prompt2Data produces realistic synthetic datasets, there are inherent limitations to be aware of:
+
+| Limitation | Description |
+|---|---|
+| **Unique string cardinality** | Fields like employee aliases, email addresses, or usernames may produce duplicates at large scale. For example, generating 10,000+ employees with unique aliases from LLM-suggested name pools can exhaust the combinatorial space, resulting in collisions. Validate uniqueness constraints post-generation for critical identifier columns. |
+| **Domain-specific realism ceiling** | The LLM's world knowledge is broad but not infinitely deep. Highly specialized domains (e.g., pharmaceutical compound structures, ISIN codes) may produce plausible-looking but technically invalid values. Always review domain-specific columns with a subject matter expert. |
+| **Non-deterministic outputs** | The same prompt may produce slightly different schemas, column names, or data distributions across runs due to LLM non-determinism. Use `np.random.seed()` within the generated notebook for reproducible data, but schema structure itself may vary. |
+| **Row count scalability** | Very large datasets (100K+ rows per table) may hit memory limits or notebook execution timeouts depending on the environment. For high-volume scenarios, consider generating in batches or adapting the notebook to a standalone script. |
+| **Statistical distribution accuracy** | While the agent targets realistic distributions (log-normal salaries, skewed ratings), the actual distribution shape depends on how the LLM interprets the prompt. Use the generated visualizations and `describe()` output to verify distributions meet your requirements. |
+| **Complex cross-table correlations** | The agent handles foreign key integrity well, but nuanced multi-table correlations (e.g., employees in the "Engineering" department should have higher average salaries than "Marketing") depend on prompt specificity. Include explicit constraints in your prompt for important correlations. |
 ---
 
 ## Conclusion
