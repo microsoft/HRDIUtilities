@@ -1,0 +1,109 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Microsoft Fabric Deployment Configuration",
+  "description": "Configuration file for deploying Microsoft Fabric resources and artifacts",
+  "parameters": {
+    "fabricWorkspaceName": {
+      "value": "contose_dev_fabric_ws"
+    },
+    "tenantName": {
+      "value": "contoso"
+    },
+    "environmentName": {
+      "value": "dev"
+    },   
+    "fabricWorkspaceIdentity": {
+      "value": "abcd1234-123445467" 
+    },
+     "storageAccountName": {
+      "value": "Contosostorage"
+    },    
+    "logAnalyticsWorkspaceId": {
+      "value": "abcd1234-123445756467"    
+    },
+    "SPNObjectID": {
+       "value": "abcd1234-123445467" 
+     },
+    "fabricLakehouseName": {
+      "value": "##fabricLakehouseName##"
+    },
+    "fabricWorkspaceId": {
+      "value": "##fabricWorkspaceId##"
+    },
+    "fabricLakehouseId": {
+      "value": "##fabricLakehouseId##"
+    },
+    "lakehouseConnString": {
+      "value": "##lakehouseConnString##"
+    },
+    "modelConfiguration": {
+      "value": {
+        "models": []
+      }
+    },
+    "poolConfiguration": {
+      "value": {
+        "name": "analyticssparkpool",
+        "nodeSize": "Medium",
+        "autoScale": "Enabled",
+        "autoScale.minNodeCount": 1,
+        "autoScale.maxNodeCount": 10
+      }
+    },
+    "folderConfiguration": {
+      "value": {
+        "folder1": "archive",
+        "folder2": "metadata",
+        "folder3": "metadata/v1",
+        "folder4": "metadata/v2"
+      }
+    },
+    "connectionConfiguration": {
+      "value": {
+        "connectionName": "adls_connection",
+        "allowConnectionUsageInGateway": false,
+        "displayName": "ADLS Gen2 Connection",
+        "connectivityType": "ShareableCloud",
+        "connectionDetails": {
+          "type": "AzureDataLakeStorage",
+          "creationMethod": "AzureDataLakeStorage",
+          "parameters": {
+            "serverSuffix": "dfs.core.windows.net",
+            "path": "/"
+          }
+        },
+        "privacyLevel": "None",
+        "credentialDetails": {
+          "type": "WorkspaceIdentity"
+        }
+      }
+    },
+    "shortcutConfiguration": {
+      "value": {
+        "shortcuts": [
+             {
+            "name": "bronze",
+            "displayName": "bronze",
+            "containerName": "bronze",
+            "subPath": "/",
+            "description": "bronze layer data - raw and unprocessed"
+          },
+          {
+            "name": "silver",
+            "displayName": "silver",
+            "containerName": "silver",
+            "subPath": "/",
+            "description": "silver layer data - cleaned and transformed"
+          },
+          {
+            "name": "gold",
+            "displayName": "gold",
+            "containerName": "gold",
+            "subPath": "/",
+            "description": "gold layer data - ready for consumption"
+          }
+        ]
+      }
+    }
+    }
+  }
