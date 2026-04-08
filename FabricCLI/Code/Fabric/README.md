@@ -8,7 +8,7 @@ This guide covers the full details of preparing Fabric artifacts for deployment.
 
 ## Artifact Folder Structure
 
-After exporting, your `Code/Fabric/` directory should look like this:
+After exporting, your `Code/Fabric/` directory should look like this, Create Folders - Notebooks, Pipelines, Models, Reports and place respective files in the same folders.
 
 ```
 Code/Fabric/
