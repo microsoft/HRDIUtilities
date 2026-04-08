@@ -1,0 +1,91 @@
+{
+    "properties": {
+        "activities": [
+            {
+                "name": "Run Ingestion Notebook",
+                "type": "TridentNotebook",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.02:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "typeProperties": {
+                    "notebookId": "##SampleIngestion##",
+                    "workspaceId": "##fabricWorkspaceId##",
+                    "parameters": {
+                        "lakehouse_id": {
+                            "value": {
+                                "value": "##fabricLakehouseId##",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "workspace_id": {
+                            "value": {
+                                "value": "##fabricWorkspaceId##",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "Run Telemetry Notebook",
+                "type": "TridentNotebook",
+                "dependsOn": [
+                    {
+                        "activity": "Run Ingestion Notebook",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.01:00:00",
+                    "retry": 1,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "typeProperties": {
+                    "notebookId": "##SampleTelemetry##",
+                    "workspaceId": "##fabricWorkspaceId##",
+                    "parameters": {
+                        "workspace_id": {
+                            "value": {
+                                "value": "##fabricWorkspaceId##",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "environment": {
+                            "value": {
+                                "value": "##environmentName##",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        ],
+        "parameters": {
+            "LakehouseId": {
+                "type": "string",
+                "defaultValue": "##fabricLakehouseId##"
+            },
+            "WorkspaceId": {
+                "type": "string",
+                "defaultValue": "##fabricWorkspaceId##"
+            }
+        },
+        "annotations": [
+            "Deployed via Fabric CLI",
+            "Environment: ##environmentName##"
+        ]
+    }
+}
