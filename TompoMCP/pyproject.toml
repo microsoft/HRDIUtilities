@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tompo-mcp"
+version = "0.1.0"
+description = "TOMPo — Power BI & Fabric Lineage Intelligence MCP Server. Trace lineage from semantic models to reports to visuals. Impact analysis for every column and measure."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Microsoft Corporation" }]
+keywords = ["powerbi", "fabric", "lineage", "mcp", "copilot", "impact-analysis", "semantic-model"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "mcp>=1.0.0",
+    "httpx>=0.27.0",
+    "azure-identity>=1.15.0",
+    "pydantic>=2.0.0",
+]
+
+[project.scripts]
+tompo-mcp = "tompo_mcp.server:run_server"
+
+[project.urls]
+Homepage = "https://github.com/microsoft/HRDIUtilities/tree/main/TompoMCP"
+Repository = "https://github.com/microsoft/HRDIUtilities"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tompo_mcp"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/tompo_mcp/viz/template.html" = "tompo_mcp/viz/template.html"

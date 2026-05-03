@@ -1,0 +1,435 @@
+"""
+TOMPo MCP Server — Power BI & Fabric Lineage Intelligence.
+
+Exposes 5 tools to AI assistants (GitHub Copilot, Claude, etc.):
+  1. list_workspaces       — List Fabric workspaces you have access to
+  2. generate_lineage      — Full lineage: model → tables → reports → visuals → fields
+  3. impact_analysis       — Where is a specific column/measure used?
+  4. describe_semantic_model — Tables, columns, measures, relationships, roles
+  5. export_lineage_html   — Generate interactive D3 visualization as HTML file
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import tempfile
+import webbrowser
+from importlib import resources
+from typing import Any
+
+from mcp.server.fastmcp import FastMCP
+
+from tompo_mcp.auth import TokenProvider
+from tompo_mcp.core.fabric_client import FabricClient
+from tompo_mcp.core.lineage import build_lineage, get_all_impact_analysis, get_impact_analysis
+from tompo_mcp.core.models import LineageNode, LineageResponse, ReportInfo, SemanticModelInfo
+from tompo_mcp.core.parser import parse_report_definition, parse_semantic_model
+
+logger = logging.getLogger(__name__)
+
+mcp = FastMCP(
+    "TOMPo",
+    instructions="Power BI & Fabric lineage intelligence — trace from semantic models to reports to individual visuals.",
+)
+
+# ── Shared state ──────────────────────────────────────────────────────
+_token_provider: TokenProvider | None = None
+_client: FabricClient | None = None
+_last_lineage: LineageResponse | None = None
+_last_workspace_id: str = ""
+
+
+def _get_client() -> FabricClient:
+    global _token_provider, _client
+    if _client is None:
+        _token_provider = TokenProvider()
+        _client = FabricClient(_token_provider)
+    return _client
+
+
+# ── Tool 1: List Workspaces ──────────────────────────────────────────
+
+@mcp.tool()
+async def list_workspaces() -> str:
+    """List all Fabric/Power BI workspaces you have access to.
+
+    Returns workspace names and IDs. Use the workspace ID in other tools.
+    Requires: az login (uses your Azure identity).
+    """
+    client = _get_client()
+    workspaces = await client.list_workspaces()
+
+    if not workspaces:
+        return "No workspaces found. Make sure you're logged in with `az login` and have access to Fabric workspaces."
+
+    lines = [f"Found {len(workspaces)} workspaces:\n"]
+    for ws in sorted(workspaces, key=lambda w: w.get("name", "")):
+        name = ws.get("name", "Unknown")
+        wid = ws.get("id", "")
+        ws_type = ws.get("type", "")
+        state = ws.get("state", "")
+        line = f"  - **{name}** (`{wid}`)"
+        if ws_type:
+            line += f" [{ws_type}]"
+        if state and state != "Active":
+            line += f" ({state})"
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
+# ── Tool 2: Generate Lineage ────────────────────────────────────────
+
+@mcp.tool()
+async def generate_lineage(
+    workspace_id: str,
+    dataset_id: str | None = None,
+    dataset_name: str | None = None,
+) -> str:
+    """Generate complete lineage for a semantic model: Model → Tables → Reports → Pages → Visuals → Columns/Measures.
+
+    Args:
+        workspace_id: The workspace ID (from list_workspaces).
+        dataset_id: The semantic model (dataset) ID. If not provided, lists available models.
+        dataset_name: Optional human name for the dataset (helps with display).
+
+    Returns the lineage tree showing exactly which columns/measures appear in which visuals.
+    """
+    global _last_lineage, _last_workspace_id
+    client = _get_client()
+
+    # If no dataset_id, list available datasets
+    if not dataset_id:
+        items = await client.get_workspace_items(workspace_id)
+        datasets = items.get("datasets", [])
+        if not datasets:
+            return "No semantic models found in this workspace."
+        lines = ["Available semantic models in this workspace:\n"]
+        for ds in datasets:
+            lines.append(f"  - **{ds.get('name', 'Unknown')}** (`{ds.get('id', '')}`)")
+        lines.append("\nUse the dataset ID to generate lineage.")
+        return "\n".join(lines)
+
+    # Get semantic model definition
+    raw_model = await client.get_semantic_model_definition(workspace_id, dataset_id)
+    if not raw_model:
+        return f"Could not retrieve semantic model definition for dataset `{dataset_id}`. Check permissions."
+
+    model = parse_semantic_model(raw_model, dataset_id, dataset_name or dataset_id)
+
+    # Get reports bound to this dataset
+    report_dicts = await client.get_reports_for_dataset(workspace_id, dataset_id)
+    if not report_dicts:
+        lineage = build_lineage(model, [], workspace_id)
+        _last_lineage = lineage
+        _last_workspace_id = workspace_id
+        return f"Semantic model **{model.name}** has {len(model.tables)} tables but no reports are bound to it.\n\n" + _format_model_summary(model)
+
+    # Get report definitions
+    reports: list[ReportInfo] = []
+    for rd in report_dicts:
+        rid = rd.get("id", "")
+        rname = rd.get("name", "Unknown")
+        raw_report = await client.get_report_definition(workspace_id, rid)
+        if raw_report:
+            report = parse_report_definition(raw_report, rid, rname, dataset_id)
+            reports.append(report)
+        else:
+            reports.append(ReportInfo(id=rid, name=rname, dataset_id=dataset_id))
+
+    # Build lineage
+    lineage = build_lineage(model, reports, workspace_id)
+    _last_lineage = lineage
+    _last_workspace_id = workspace_id
+
+    return _format_lineage_tree(lineage)
+
+
+def _format_lineage_tree(lineage: LineageResponse) -> str:
+    """Format lineage as a readable tree string."""
+    lines: list[str] = []
+    model = lineage.model
+    tree = lineage.lineage_tree
+
+    lines.append(f"# Lineage for {model.name}\n")
+    lines.append(f"**Tables:** {len(model.tables)} | **Reports:** {len(lineage.reports)} | "
+                 f"**Relationships:** {len(model.relationships)}\n")
+
+    def _render_node(node: LineageNode, indent: str = "", is_last: bool = True) -> None:
+        connector = "└── " if is_last else "├── "
+        prefix = indent + connector
+
+        icon = {
+            "model": "📊", "table": "📋", "report": "📄",
+            "page": "📑", "visual": "📈", "column": "🔹", "measure": "🔸",
+        }.get(node.node_type, "•")
+
+        label = node.name
+        extra = ""
+
+        if node.node_type == "visual":
+            title = node.metadata.get("title", "")
+            if title and title != node.name:
+                extra = f" — *{title}*"
+        elif node.node_type == "table":
+            cc = node.metadata.get("column_count", 0)
+            mc = node.metadata.get("measure_count", 0)
+            if node.metadata.get("orphan"):
+                extra = f" ({cc} cols, {mc} measures) ⚠️ *not used in any report*"
+            else:
+                extra = f" ({cc} cols, {mc} measures)"
+        elif node.node_type in ("column", "measure"):
+            extra = f" [{node.node_type[0].upper()}]"
+
+        lines.append(f"{prefix}{icon} {label}{extra}")
+
+        child_indent = indent + ("    " if is_last else "│   ")
+        for i, child in enumerate(node.children):
+            _render_node(child, child_indent, i == len(node.children) - 1)
+
+    if tree.children:
+        for i, child in enumerate(tree.children):
+            _render_node(child, "", i == len(tree.children) - 1)
+    else:
+        lines.append("No lineage connections found.")
+
+    return "\n".join(lines)
+
+
+def _format_model_summary(model: SemanticModelInfo) -> str:
+    lines = [f"## {model.name}\n"]
+    for tbl in model.tables:
+        if tbl.is_hidden:
+            continue
+        lines.append(f"**{tbl.name}** — {len(tbl.columns)} columns, {len(tbl.measures)} measures")
+    return "\n".join(lines)
+
+
+# ── Tool 3: Impact Analysis ─────────────────────────────────────────
+
+@mcp.tool()
+async def impact_analysis(
+    field_name: str,
+    table_name: str = "",
+    field_type: str = "column",
+    workspace_id: str = "",
+    dataset_id: str = "",
+) -> str:
+    """Find all visuals where a specific column or measure is used (impact analysis).
+
+    Args:
+        field_name: The column or measure name to search for.
+        table_name: The table containing the field. If empty, searches all tables.
+        field_type: "column" or "measure" (default: "column").
+        workspace_id: Workspace ID (optional if you just ran generate_lineage).
+        dataset_id: Dataset ID (optional if you just ran generate_lineage).
+
+    Shows which reports, pages, and visuals would be affected if you rename or remove this field.
+    """
+    global _last_lineage, _last_workspace_id
+
+    # Use cached lineage if available
+    lineage = _last_lineage
+    wid = workspace_id or _last_workspace_id
+
+    if not lineage and workspace_id and dataset_id:
+        # Generate fresh lineage
+        await generate_lineage(workspace_id, dataset_id)
+        lineage = _last_lineage
+        wid = workspace_id
+
+    if not lineage:
+        return "No lineage data available. Run `generate_lineage` first for a workspace and dataset."
+
+    reports = lineage.reports
+    model = lineage.model
+
+    # If no table_name, search all tables
+    if not table_name:
+        results = []
+        for tbl in model.tables:
+            for col in tbl.columns:
+                if col.name.lower() == field_name.lower():
+                    r = get_impact_analysis(col.name, "column", tbl.name, reports, wid)
+                    if r.usage_count > 0:
+                        results.append(r)
+            for m in tbl.measures:
+                if m.name.lower() == field_name.lower():
+                    r = get_impact_analysis(m.name, "measure", tbl.name, reports, wid)
+                    if r.usage_count > 0:
+                        results.append(r)
+        if not results:
+            return f"Field `{field_name}` is not used in any visual across {len(reports)} report(s)."
+        return _format_impact_results(results)
+    else:
+        result = get_impact_analysis(field_name, field_type, table_name, reports, wid)
+        if result.usage_count == 0:
+            return f"`{table_name}.{field_name}` ({field_type}) is not used in any visual."
+        return _format_impact_results([result])
+
+
+def _format_impact_results(results: list) -> str:
+    lines: list[str] = []
+    total_usage = sum(r.usage_count for r in results)
+    lines.append(f"# Impact Analysis — {total_usage} visual(s) affected\n")
+
+    for r in results:
+        lines.append(f"## `{r.table_name}.{r.object_name}` ({r.object_type}) — {r.usage_count} usage(s)\n")
+        lines.append("| Report | Page | Visual | Type |")
+        lines.append("|--------|------|--------|------|")
+        for item in r.used_in:
+            title = item.visual_title or item.visual_type
+            lines.append(f"| {item.report_name} | {item.page_name} | {title} | {item.visual_type} |")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# ── Tool 4: Describe Semantic Model ──────────────────────────────────
+
+@mcp.tool()
+async def describe_semantic_model(
+    workspace_id: str = "",
+    dataset_id: str = "",
+) -> str:
+    """Describe the semantic model: tables, columns, measures, relationships, and roles.
+
+    Args:
+        workspace_id: Workspace ID (optional if you just ran generate_lineage).
+        dataset_id: Dataset ID (optional if you just ran generate_lineage).
+
+    Returns detailed metadata about the semantic model structure.
+    """
+    global _last_lineage
+
+    lineage = _last_lineage
+
+    if not lineage and workspace_id and dataset_id:
+        await generate_lineage(workspace_id, dataset_id)
+        lineage = _last_lineage
+
+    if not lineage:
+        return "No lineage data available. Run `generate_lineage` first."
+
+    model = lineage.model
+    lines: list[str] = []
+
+    lines.append(f"# Semantic Model: {model.name}\n")
+    if model.description:
+        lines.append(f"*{model.description}*\n")
+
+    # Tables summary
+    visible_tables = [t for t in model.tables if not t.is_hidden]
+    lines.append(f"**Tables:** {len(visible_tables)} visible ({len(model.tables)} total)")
+    lines.append(f"**Relationships:** {len(model.relationships)}")
+    lines.append(f"**Roles:** {len(model.roles)}\n")
+
+    # Per-table detail
+    for tbl in visible_tables:
+        lines.append(f"## 📋 {tbl.name}")
+        if tbl.description:
+            lines.append(f"*{tbl.description}*")
+        if tbl.source:
+            src_preview = tbl.source[:200] + "..." if len(tbl.source) > 200 else tbl.source
+            lines.append(f"Source: `{src_preview}`")
+
+        if tbl.columns:
+            lines.append(f"\n**Columns ({len(tbl.columns)}):**")
+            for col in tbl.columns:
+                if col.is_hidden:
+                    continue
+                desc = f" — {col.description}" if col.description else ""
+                lines.append(f"  - `{col.name}` ({col.data_type}){desc}")
+
+        if tbl.measures:
+            lines.append(f"\n**Measures ({len(tbl.measures)}):**")
+            for m in tbl.measures:
+                desc = f" — {m.description}" if m.description else ""
+                expr_preview = m.expression[:100] + "..." if len(m.expression) > 100 else m.expression
+                lines.append(f"  - `{m.name}` = `{expr_preview}`{desc}")
+        lines.append("")
+
+    # Relationships
+    if model.relationships:
+        lines.append("## 🔗 Relationships\n")
+        lines.append("| From | → | To | Cardinality | Active |")
+        lines.append("|------|---|-----|-------------|--------|")
+        for rel in model.relationships:
+            card = f"{rel.from_cardinality}:{rel.to_cardinality}"
+            active = "✅" if rel.is_active else "❌"
+            lines.append(f"| {rel.from_table}.{rel.from_column} | → | {rel.to_table}.{rel.to_column} | {card} | {active} |")
+        lines.append("")
+
+    # Roles
+    if model.roles:
+        lines.append("## 🔐 Roles\n")
+        for role in model.roles:
+            lines.append(f"  - **{role.name}** (permission: {role.model_permission})")
+            for tp in role.table_permissions:
+                lines.append(f"    - {tp.get('table', '')}: `{tp.get('filter', '')}`")
+
+    return "\n".join(lines)
+
+
+# ── Tool 5: Export Lineage HTML ──────────────────────────────────────
+
+@mcp.tool()
+async def export_lineage_html(
+    output_path: str = "",
+) -> str:
+    """Export the last generated lineage as an interactive D3 tree visualization (HTML file).
+
+    Args:
+        output_path: File path to save HTML (default: auto-generated in current directory).
+
+    Opens the visualization in your default browser. The HTML file is self-contained
+    with all JavaScript/CSS inlined — no server needed, works offline.
+
+    Run generate_lineage first to populate the lineage data.
+    """
+    global _last_lineage
+
+    if not _last_lineage:
+        return "No lineage data available. Run `generate_lineage` first."
+
+    lineage_json = _last_lineage.model_dump()
+
+    # Load HTML template
+    template_path = os.path.join(os.path.dirname(__file__), "viz", "template.html")
+    with open(template_path, "r", encoding="utf-8") as f:
+        template = f.read()
+
+    # Inject lineage data
+    html = template.replace("__LINEAGE_DATA_PLACEHOLDER__", json.dumps(lineage_json, default=str))
+
+    # Determine output path
+    if not output_path:
+        model_name = _last_lineage.model.name.replace(" ", "_").replace("/", "_")
+        output_path = os.path.join(os.getcwd(), f"lineage_{model_name}.html")
+
+    # Validate output path — prevent path traversal
+    output_path = os.path.abspath(output_path)
+    if not output_path.endswith(".html"):
+        return "Error: output_path must end with .html"
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+    # Open in browser
+    try:
+        webbrowser.open(f"file://{os.path.abspath(output_path)}")
+    except Exception:
+        pass
+
+    return f"Interactive lineage visualization saved to `{output_path}` and opened in browser."
+
+
+# ── Server entry point ───────────────────────────────────────────────
+
+def run_server() -> None:
+    """Start the MCP server (stdio transport)."""
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    mcp.run(transport="stdio")
