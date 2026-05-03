@@ -14,6 +14,7 @@
   #toolbar { display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: #fff; border-bottom: 1px solid #e0e0e0; flex-wrap: wrap; }
   #toolbar button { background: #f3f3f3; border: 1px solid #d0d0d0; border-radius: 4px; padding: 4px 12px; cursor: pointer; font-size: 13px; }
   #toolbar button:hover { background: #e0e0e0; }
+  #toolbar select { padding: 4px 8px; border: 1px solid #d0d0d0; border-radius: 4px; font-size: 13px; background: #fff; }
   #legend { display: flex; gap: 14px; flex-wrap: wrap; }
   .legend-item { display: flex; align-items: center; gap: 4px; font-size: 12px; }
   .legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
@@ -28,7 +29,6 @@
   .node:hover circle { filter: brightness(1.15); }
   .node text { pointer-events: none; }
   .link { fill: none; stroke: #c0c0c0; stroke-width: 1.5; stroke-opacity: .5; }
-  /* Impact tab */
   #impact-panel, #model-panel { display: none; padding: 16px; overflow: auto; max-height: calc(100vh - 160px); }
   table.data-grid { width: 100%; border-collapse: collapse; font-size: 13px; }
   table.data-grid th { background: #f3f3f3; text-align: left; padding: 8px 10px; border-bottom: 2px solid #d0d0d0; position: sticky; top: 0; }
@@ -37,6 +37,7 @@
   .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
   .badge-col { background: #e8daef; color: #6c3483; }
   .badge-meas { background: #fadbd8; color: #922b21; }
+  .badge-model { background: #d4e6f1; color: #1b4f72; }
   .search-box { padding: 6px 12px; border: 1px solid #d0d0d0; border-radius: 4px; font-size: 13px; width: 280px; }
   .stats { display: flex; gap: 16px; margin-bottom: 12px; flex-wrap: wrap; }
   .stat-card { background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 10px 16px; text-align: center; min-width: 100px; }
@@ -45,6 +46,11 @@
   #main { display: flex; flex-direction: column; height: calc(100vh - 0px); }
   .fullscreen #header, .fullscreen #banner { display: none; }
   .fullscreen #main { height: 100vh; }
+  .filter-bar { display: flex; gap: 10px; align-items: center; padding: 8px 16px; background: #f8f8f8; border-bottom: 1px solid #e8e8e8; flex-wrap: wrap; }
+  .filter-bar label { font-size: 12px; font-weight: 600; color: #555; }
+  .filter-bar select { padding: 4px 8px; border: 1px solid #d0d0d0; border-radius: 4px; font-size: 12px; min-width: 140px; }
+  .model-chip { display: inline-block; background: #e8f4fd; border: 1px solid #0078d4; color: #0078d4; padding: 2px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; margin: 2px; }
+  .model-chip.orphaned { background: #fff3e0; border-color: #e65100; color: #e65100; }
 </style>
 </head>
 <body>
@@ -60,7 +66,15 @@
   <div id="tabs">
     <div class="tab active" data-tab="tree">Lineage Tree</div>
     <div class="tab" data-tab="impact">Impact Analysis</div>
-    <div class="tab" data-tab="model">Semantic Model</div>
+    <div class="tab" data-tab="model">Semantic Models</div>
+  </div>
+  <div class="filter-bar" id="filter-bar">
+    <label>Model:</label>
+    <select id="modelSelector" onchange="onModelSelect(this.value)"></select>
+    <label>Report:</label>
+    <select id="reportSelector" onchange="onReportFilter(this.value)"></select>
+    <label>Page:</label>
+    <select id="pageSelector" onchange="onPageFilter(this.value)"></select>
   </div>
   <div id="toolbar">
     <div id="legend"></div>
@@ -83,25 +97,32 @@
 
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
-// ── DATA ──────────────────────────────────────────────────────────
-const DATA = __LINEAGE_DATA_PLACEHOLDER__;
+// ── DATA (array of LineageResponse objects) ───────────────────────
+const ALL_DATA = __LINEAGE_DATA_PLACEHOLDER__;
+
+// Normalize: support both single object (legacy) and array format
+const MODELS = Array.isArray(ALL_DATA) ? ALL_DATA : [ALL_DATA];
 
 const NODE_COLORS = {
-  model: "#0078d4", table: "#00b7c3", report: "#d13438",
+  workspace: "#323130", model: "#0078d4", table: "#00b7c3", report: "#d13438",
   page: "#107c10", visual: "#ff8c00", column: "#8764b8", measure: "#e3008c"
 };
 const NODE_LABELS = {
-  model: "Model", table: "Table", report: "Report",
+  workspace: "Workspace", model: "Model", table: "Table", report: "Report",
   page: "Page", visual: "Visual", column: "Column", measure: "Measure"
 };
-const SIZES = { model: 10, table: 8, report: 8, page: 7, visual: 6, column: 5, measure: 5 };
+const SIZES = { workspace: 12, model: 10, table: 8, report: 8, page: 7, visual: 6, column: 5, measure: 5 };
 
 let currentFontSize = 12;
 let treeRoot;
+let currentModelIndex = -1; // -1 means "All Models"
+let currentReportFilter = "";
+let currentPageFilter = "";
 
 // ── LEGEND ────────────────────────────────────────────────────────
 const legendEl = document.getElementById("legend");
 Object.entries(NODE_COLORS).forEach(([type, color]) => {
+  if (type === "workspace" && MODELS.length <= 1) return;
   legendEl.innerHTML += `<div class="legend-item"><span class="legend-dot" style="background:${color}"></span>${NODE_LABELS[type]}</div>`;
 });
 
@@ -115,23 +136,150 @@ document.querySelectorAll(".tab").forEach(tab => {
     document.getElementById("impact-panel").style.display = which === "impact" ? "block" : "none";
     document.getElementById("model-panel").style.display = which === "model" ? "block" : "none";
     document.getElementById("toolbar").style.display = which === "tree" ? "flex" : "none";
+    document.getElementById("filter-bar").style.display = which === "tree" ? "flex" : "none";
   });
 });
 
 // ── TITLE ─────────────────────────────────────────────────────────
-const model = DATA.model;
-document.getElementById("model-title").textContent = `${model.name} — ${model.tables.length} tables, ${DATA.reports.length} reports`;
+const totalTables = MODELS.reduce((s, m) => s + m.model.tables.length, 0);
+const totalReports = MODELS.reduce((s, m) => s + m.reports.length, 0);
+document.getElementById("model-title").textContent = `${MODELS.length} model(s) — ${totalTables} tables, ${totalReports} reports`;
 
-// ── TREE ──────────────────────────────────────────────────────────
+// ── MODEL SELECTOR DROPDOWN ───────────────────────────────────────
+const modelSel = document.getElementById("modelSelector");
+const reportSel = document.getElementById("reportSelector");
+const pageSel = document.getElementById("pageSelector");
+
+function populateModelSelector() {
+  modelSel.innerHTML = "";
+  if (MODELS.length > 1) {
+    modelSel.innerHTML += `<option value="-1">All Models (${MODELS.length})</option>`;
+  }
+  MODELS.forEach((m, i) => {
+    const rCount = m.reports.length;
+    const status = rCount > 0 ? `${rCount} reports` : "orphaned";
+    modelSel.innerHTML += `<option value="${i}">${esc(m.model.name)} (${status})</option>`;
+  });
+}
+
+function populateReportSelector() {
+  reportSel.innerHTML = `<option value="">All Reports</option>`;
+  const models = currentModelIndex === -1 ? MODELS : [MODELS[currentModelIndex]];
+  const seen = new Set();
+  models.forEach(m => {
+    m.reports.forEach(r => {
+      if (!seen.has(r.id)) {
+        seen.add(r.id);
+        reportSel.innerHTML += `<option value="${esc(r.id)}">${esc(r.name)}</option>`;
+      }
+    });
+  });
+}
+
+function populatePageSelector() {
+  pageSel.innerHTML = `<option value="">All Pages</option>`;
+  const models = currentModelIndex === -1 ? MODELS : [MODELS[currentModelIndex]];
+  const seen = new Set();
+  models.forEach(m => {
+    m.reports.forEach(r => {
+      if (currentReportFilter && r.id !== currentReportFilter) return;
+      (r.pages||[]).forEach(pg => {
+        const key = r.id + "/" + pg.name;
+        if (!seen.has(key)) {
+          seen.add(key);
+          pageSel.innerHTML += `<option value="${esc(key)}">${esc(pg.display_name)}</option>`;
+        }
+      });
+    });
+  });
+}
+
+function onModelSelect(val) {
+  currentModelIndex = parseInt(val);
+  currentReportFilter = "";
+  currentPageFilter = "";
+  populateReportSelector();
+  populatePageSelector();
+  rebuildTree();
+}
+
+function onReportFilter(val) {
+  currentReportFilter = val;
+  currentPageFilter = "";
+  populatePageSelector();
+  rebuildTree();
+}
+
+function onPageFilter(val) {
+  currentPageFilter = val;
+  rebuildTree();
+}
+
+populateModelSelector();
+populateReportSelector();
+populatePageSelector();
+
+// ── TREE BUILDING ─────────────────────────────────────────────────
 function deepClone(node) {
+  if (!node) return { name: "Empty", node_type: "model", metadata: {}, children: [] };
   return { name: node.name, node_type: node.node_type, metadata: {...(node.metadata||{})},
     children: (node.children||[]).map(deepClone) };
 }
 
-const treeData = deepClone(DATA.lineage_tree);
+function buildCombinedTree() {
+  const models = currentModelIndex === -1 ? MODELS : [MODELS[currentModelIndex]];
+
+  if (models.length === 1) {
+    let tree = deepClone(models[0].lineage_tree);
+    tree = filterTree(tree);
+    return tree;
+  }
+
+  // Multiple models — create a workspace root node
+  const root = {
+    name: "Workspace",
+    node_type: "workspace",
+    metadata: { model_count: models.length },
+    children: models.map(m => {
+      let tree = deepClone(m.lineage_tree);
+      tree = filterTree(tree);
+      return tree;
+    }).filter(t => t && ((t.children && t.children.length > 0) || !currentReportFilter))
+  };
+  return root;
+}
+
+function filterTree(node) {
+  if (!node) return null;
+  if (!currentReportFilter && !currentPageFilter) return node;
+
+  if (node.node_type === "model" || node.node_type === "workspace") {
+    node.children = (node.children || []).map(child => filterTree(child)).filter(c => c !== null);
+    return node;
+  }
+  if (node.node_type === "table") {
+    node.children = (node.children || []).filter(child => {
+      if (child.node_type !== "report") return true;
+      if (currentReportFilter && child.metadata?.id !== currentReportFilter) return false;
+      if (currentPageFilter) {
+        child.children = (child.children || []).filter(pg => {
+          const key = child.metadata?.id + "/" + pg.metadata?.name;
+          return key === currentPageFilter;
+        });
+        return child.children.length > 0;
+      }
+      return true;
+    });
+    return node.children.length > 0 ? node : null;
+  }
+  return node;
+}
+
+// ── TREE RENDERING ────────────────────────────────────────────────
+let treeData;
 const container = document.getElementById("tree-panel");
 const W = Math.max(container.clientWidth || 1200, 800);
-const H = Math.max(window.innerHeight - 200, 500);
+const H = Math.max(window.innerHeight - 220, 500);
 
 const svg = d3.select("#tree-panel").append("svg").attr("width", W).attr("height", H);
 const g = svg.append("g");
@@ -141,6 +289,11 @@ const nodesG = g.append("g");
 const zoom = d3.zoom().scaleExtent([0.1, 4]).on("zoom", e => g.attr("transform", e.transform));
 svg.call(zoom);
 svg.call(zoom.transform, d3.zoomIdentity.translate(140, 40).scale(0.85));
+
+function rebuildTree() {
+  treeData = buildCombinedTree();
+  renderTree();
+}
 
 function renderTree() {
   const root = d3.hierarchy(treeData, d => d.children);
@@ -223,44 +376,56 @@ function expandAll() { expand(treeData); renderTree(); }
 function collapseAll() { (treeData.children||[]).forEach(collapseNode); renderTree(); }
 function expand(n) { if(n._children){n.children=n._children;n._children=undefined;} (n.children||[]).forEach(expand); }
 function collapseNode(n) { (n.children||[]).forEach(collapseNode); if(n.children?.length){n._children=n.children;n.children=undefined;} }
-function resetView() { Object.assign(treeData, deepClone(DATA.lineage_tree)); renderTree(); svg.call(zoom.transform, d3.zoomIdentity.translate(140,40).scale(0.85)); }
+function resetView() { rebuildTree(); svg.call(zoom.transform, d3.zoomIdentity.translate(140,40).scale(0.85)); }
 function changeFontSize(v) { currentFontSize = +v; nodesG.selectAll(".label").attr("font-size", v+"px"); }
 function toggleFullscreen() { document.body.classList.toggle("fullscreen"); }
 
-renderTree();
+// Initial render
+rebuildTree();
 
 // ── IMPACT ANALYSIS TAB ───────────────────────────────────────────
 (function buildImpact() {
-  const reports = DATA.reports;
   const rows = [];
-  reports.forEach(r => {
-    (r.pages||[]).forEach(pg => {
-      (pg.visuals||[]).forEach(v => {
-        (v.field_bindings||[]).forEach(fb => {
-          rows.push({ table: fb.table_name, field: fb.field_name, type: fb.field_type,
-            report: r.name, page: pg.display_name, visual: v.title || v.visual_type, vtype: v.visual_type });
+  MODELS.forEach(mData => {
+    const modelName = mData.model.name;
+    (mData.reports||[]).forEach(r => {
+      (r.pages||[]).forEach(pg => {
+        (pg.visuals||[]).forEach(v => {
+          (v.field_bindings||[]).forEach(fb => {
+            rows.push({ model: modelName, table: fb.table_name, field: fb.field_name, type: fb.field_type,
+              report: r.name, page: pg.display_name, visual: v.title || v.visual_type, vtype: v.visual_type });
+          });
         });
       });
     });
   });
 
-  const uniqCols = new Set(rows.filter(r=>r.type==="column").map(r=>r.table+"."+r.field)).size;
-  const uniqMeas = new Set(rows.filter(r=>r.type==="measure").map(r=>r.table+"."+r.field)).size;
+  const uniqModels = new Set(rows.map(r=>r.model)).size || MODELS.length;
+  const uniqCols = new Set(rows.filter(r=>r.type==="column").map(r=>r.model+"."+r.table+"."+r.field)).size;
+  const uniqMeas = new Set(rows.filter(r=>r.type==="measure").map(r=>r.model+"."+r.table+"."+r.field)).size;
   const uniqReports = new Set(rows.map(r=>r.report)).size;
   const uniqVisuals = rows.length;
 
   const panel = document.getElementById("impact-panel");
   panel.innerHTML = `
     <div class="stats">
+      <div class="stat-card"><div class="stat-val">${uniqModels}</div><div class="stat-label">Models</div></div>
       <div class="stat-card"><div class="stat-val">${uniqCols}</div><div class="stat-label">Columns Used</div></div>
       <div class="stat-card"><div class="stat-val">${uniqMeas}</div><div class="stat-label">Measures Used</div></div>
       <div class="stat-card"><div class="stat-val">${uniqReports}</div><div class="stat-label">Reports</div></div>
       <div class="stat-card"><div class="stat-val">${uniqVisuals}</div><div class="stat-label">Field Bindings</div></div>
     </div>
-    <input class="search-box" placeholder="Search fields, reports, visuals..." oninput="filterImpact(this.value)">
+    <div style="display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap;align-items:center">
+      <input class="search-box" placeholder="Search fields, reports, visuals..." oninput="filterImpact(this.value)">
+      <select id="impactModelFilter" onchange="filterImpact(document.querySelector('.search-box').value)" style="padding:6px 8px;border:1px solid #d0d0d0;border-radius:4px;font-size:13px">
+        <option value="">All Models</option>
+        ${MODELS.map(m => `<option value="${esc(m.model.name)}">${esc(m.model.name)}</option>`).join("")}
+      </select>
+    </div>
     <table class="data-grid" id="impact-table">
-      <thead><tr><th>Table</th><th>Field</th><th>Type</th><th>Report</th><th>Page</th><th>Visual</th><th>Visual Type</th></tr></thead>
-      <tbody>${rows.map(r => `<tr>
+      <thead><tr><th>Model</th><th>Table</th><th>Field</th><th>Type</th><th>Report</th><th>Page</th><th>Visual</th><th>Visual Type</th></tr></thead>
+      <tbody>${rows.map(r => `<tr data-model="${esc(r.model)}">
+        <td><span class="badge badge-model">${esc(r.model)}</span></td>
         <td>${esc(r.table)}</td>
         <td>${esc(r.field)}</td>
         <td><span class="badge ${r.type==='measure'?'badge-meas':'badge-col'}">${r.type}</span></td>
@@ -274,53 +439,79 @@ renderTree();
 
 function filterImpact(q) {
   const lower = q.toLowerCase();
+  const modelFilter = document.getElementById("impactModelFilter")?.value || "";
   document.querySelectorAll("#impact-table tbody tr").forEach(tr => {
-    tr.style.display = tr.textContent.toLowerCase().includes(lower) ? "" : "none";
+    const matchText = !lower || tr.textContent.toLowerCase().includes(lower);
+    const matchModel = !modelFilter || tr.dataset.model === modelFilter;
+    tr.style.display = (matchText && matchModel) ? "" : "none";
   });
 }
 function esc(s) { const d = document.createElement("div"); d.textContent = s||""; return d.innerHTML; }
 
-// ── SEMANTIC MODEL TAB ────────────────────────────────────────────
-(function buildModel() {
-  const m = DATA.model;
+// ── SEMANTIC MODELS TAB ───────────────────────────────────────────
+(function buildModelsTab() {
   const panel = document.getElementById("model-panel");
-  let html = `<h2 style="margin-bottom:12px">${esc(m.name)}</h2>`;
-
-  const visTables = m.tables.filter(t => !t.is_hidden);
-  html += `<div class="stats">
-    <div class="stat-card"><div class="stat-val">${visTables.length}</div><div class="stat-label">Tables</div></div>
-    <div class="stat-card"><div class="stat-val">${visTables.reduce((s,t)=>s+t.columns.length,0)}</div><div class="stat-label">Columns</div></div>
-    <div class="stat-card"><div class="stat-val">${visTables.reduce((s,t)=>s+t.measures.length,0)}</div><div class="stat-label">Measures</div></div>
-    <div class="stat-card"><div class="stat-val">${m.relationships.length}</div><div class="stat-label">Relationships</div></div>
+  let html = `<div class="stats">
+    <div class="stat-card"><div class="stat-val">${MODELS.length}</div><div class="stat-label">Semantic Models</div></div>
+    <div class="stat-card"><div class="stat-val">${totalTables}</div><div class="stat-label">Total Tables</div></div>
+    <div class="stat-card"><div class="stat-val">${MODELS.reduce((s,m)=>s+m.model.tables.reduce((ss,t)=>ss+t.columns.length,0),0)}</div><div class="stat-label">Total Columns</div></div>
+    <div class="stat-card"><div class="stat-val">${MODELS.reduce((s,m)=>s+m.model.tables.reduce((ss,t)=>ss+t.measures.length,0),0)}</div><div class="stat-label">Total Measures</div></div>
+    <div class="stat-card"><div class="stat-val">${totalReports}</div><div class="stat-label">Total Reports</div></div>
   </div>`;
 
-  visTables.forEach(tbl => {
-    html += `<details style="margin-bottom:8px"><summary style="cursor:pointer;font-weight:600;padding:6px 0">📋 ${esc(tbl.name)} — ${tbl.columns.length} cols, ${tbl.measures.length} measures</summary>`;
-    if (tbl.columns.length) {
-      html += `<table class="data-grid" style="margin:8px 0 8px 16px"><thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead><tbody>`;
-      tbl.columns.filter(c=>!c.is_hidden).forEach(c => {
-        html += `<tr><td>${esc(c.name)}</td><td>${esc(c.data_type)}</td><td>${esc(c.description||"")}</td></tr>`;
-      });
-      html += `</tbody></table>`;
+  html += `<div style="margin-bottom:16px">`;
+  MODELS.forEach(mData => {
+    const rCount = mData.reports.length;
+    const cls = rCount > 0 ? "model-chip" : "model-chip orphaned";
+    html += `<span class="${cls}">${esc(mData.model.name)} (${rCount > 0 ? rCount + ' reports' : 'orphaned'})</span>`;
+  });
+  html += `</div>`;
+
+  MODELS.forEach(mData => {
+    const m = mData.model;
+    const reports = mData.reports;
+    const visTables = m.tables.filter(t => !t.is_hidden);
+
+    html += `<details style="margin-bottom:12px;border:1px solid #e0e0e0;border-radius:6px;padding:4px 12px;background:#fff">
+      <summary style="cursor:pointer;font-weight:600;padding:8px 0;font-size:14px">
+        &#x1F4CA; ${esc(m.name)} &mdash; ${visTables.length} tables, ${m.relationships.length} relationships, ${reports.length} report(s)
+        ${reports.length === 0 ? '<span style="color:#e65100;font-size:11px"> &#x26A0;&#xFE0F; Orphaned</span>' : ''}
+      </summary>`;
+
+    if (reports.length > 0) {
+      html += `<div style="margin:8px 0"><strong>Reports:</strong> ${reports.map(r => esc(r.name)).join(", ")}</div>`;
     }
-    if (tbl.measures.length) {
-      html += `<table class="data-grid" style="margin:8px 0 8px 16px"><thead><tr><th>Measure</th><th>Expression</th></tr></thead><tbody>`;
-      tbl.measures.forEach(m => {
-        html += `<tr><td>${esc(m.name)}</td><td><code style="font-size:12px">${esc(m.expression)}</code></td></tr>`;
+
+    visTables.forEach(tbl => {
+      html += `<details style="margin:4px 0 4px 16px"><summary style="cursor:pointer;font-weight:500;padding:4px 0">&#x1F4CB; ${esc(tbl.name)} &mdash; ${tbl.columns.length} cols, ${tbl.measures.length} measures</summary>`;
+      if (tbl.columns.length) {
+        html += `<table class="data-grid" style="margin:8px 0 8px 16px"><thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead><tbody>`;
+        tbl.columns.filter(c=>!c.is_hidden).forEach(c => {
+          html += `<tr><td>${esc(c.name)}</td><td>${esc(c.data_type)}</td><td>${esc(c.description||"")}</td></tr>`;
+        });
+        html += `</tbody></table>`;
+      }
+      if (tbl.measures.length) {
+        html += `<table class="data-grid" style="margin:8px 0 8px 16px"><thead><tr><th>Measure</th><th>Expression</th></tr></thead><tbody>`;
+        tbl.measures.forEach(ms => {
+          html += `<tr><td>${esc(ms.name)}</td><td><code style="font-size:12px">${esc(ms.expression)}</code></td></tr>`;
+        });
+        html += `</tbody></table>`;
+      }
+      html += `</details>`;
+    });
+
+    if (m.relationships.length) {
+      html += `<details style="margin:8px 0 8px 16px"><summary style="cursor:pointer;font-weight:500;padding:4px 0">&#x1F517; Relationships (${m.relationships.length})</summary>
+        <table class="data-grid" style="margin:8px 0"><thead><tr><th>From</th><th>&rarr;</th><th>To</th><th>Cardinality</th><th>Active</th></tr></thead><tbody>`;
+      m.relationships.forEach(r => {
+        html += `<tr><td>${esc(r.from_table)}.${esc(r.from_column)}</td><td>&rarr;</td><td>${esc(r.to_table)}.${esc(r.to_column)}</td><td>${r.from_cardinality}:${r.to_cardinality}</td><td>${r.is_active?"&#x2705;":"&#x274C;"}</td></tr>`;
       });
-      html += `</tbody></table>`;
+      html += `</tbody></table></details>`;
     }
+
     html += `</details>`;
   });
-
-  if (m.relationships.length) {
-    html += `<h3 style="margin:16px 0 8px">🔗 Relationships</h3>
-      <table class="data-grid"><thead><tr><th>From</th><th>→</th><th>To</th><th>Cardinality</th><th>Active</th></tr></thead><tbody>`;
-    m.relationships.forEach(r => {
-      html += `<tr><td>${esc(r.from_table)}.${esc(r.from_column)}</td><td>→</td><td>${esc(r.to_table)}.${esc(r.to_column)}</td><td>${r.from_cardinality}:${r.to_cardinality}</td><td>${r.is_active?"✅":"❌"}</td></tr>`;
-    });
-    html += `</tbody></table>`;
-  }
 
   panel.innerHTML = html;
 })();
