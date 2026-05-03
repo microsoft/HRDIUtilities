@@ -327,48 +327,58 @@ async def impact_analysis(
         workspace_id: Workspace ID (optional if you just ran generate_lineage).
         dataset_id: Dataset ID (optional if you just ran generate_lineage).
 
-    Shows which reports, pages, and visuals would be affected if you rename or remove this field.
+    Searches across ALL scanned models in the workspace. Shows which reports, pages, and
+    visuals would be affected if you rename or remove this field.
     """
-    global _last_lineage, _last_workspace_id
+    global _last_lineage, _last_workspace_id, _workspace_lineages
 
-    # Use cached lineage if available
-    lineage = _last_lineage
     wid = workspace_id or _last_workspace_id
 
-    if not lineage and workspace_id and dataset_id:
-        # Generate fresh lineage
+    # Determine which lineages to search
+    lineages_to_search: list[LineageResponse] = []
+    if dataset_id and dataset_id in _workspace_lineages:
+        lineages_to_search = [_workspace_lineages[dataset_id]]
+    elif _workspace_lineages:
+        lineages_to_search = list(_workspace_lineages.values())
+    elif _last_lineage:
+        lineages_to_search = [_last_lineage]
+    elif workspace_id and dataset_id:
         await generate_lineage(workspace_id, dataset_id)
-        lineage = _last_lineage
-        wid = workspace_id
+        if _last_lineage:
+            lineages_to_search = [_last_lineage]
 
-    if not lineage:
-        return "No lineage data available. Run `generate_lineage` first for a workspace and dataset."
+    if not lineages_to_search:
+        return "No lineage data available. Run `generate_workspace_lineage` or `generate_lineage` first."
 
-    reports = lineage.reports
-    model = lineage.model
+    # Search across all lineages
+    all_results = []
+    for lineage in lineages_to_search:
+        reports = lineage.reports
+        model = lineage.model
 
-    # If no table_name, search all tables
-    if not table_name:
-        results = []
-        for tbl in model.tables:
-            for col in tbl.columns:
-                if col.name.lower() == field_name.lower():
-                    r = get_impact_analysis(col.name, "column", tbl.name, reports, wid)
-                    if r.usage_count > 0:
-                        results.append(r)
-            for m in tbl.measures:
-                if m.name.lower() == field_name.lower():
-                    r = get_impact_analysis(m.name, "measure", tbl.name, reports, wid)
-                    if r.usage_count > 0:
-                        results.append(r)
-        if not results:
-            return f"Field `{field_name}` is not used in any visual across {len(reports)} report(s)."
-        return _format_impact_results(results)
-    else:
-        result = get_impact_analysis(field_name, field_type, table_name, reports, wid)
-        if result.usage_count == 0:
-            return f"`{table_name}.{field_name}` ({field_type}) is not used in any visual."
-        return _format_impact_results([result])
+        if not table_name:
+            for tbl in model.tables:
+                for col in tbl.columns:
+                    if col.name.lower() == field_name.lower():
+                        r = get_impact_analysis(col.name, "column", tbl.name, reports, wid)
+                        if r.usage_count > 0:
+                            all_results.append((model.name, r))
+                for m in tbl.measures:
+                    if m.name.lower() == field_name.lower():
+                        r = get_impact_analysis(m.name, "measure", tbl.name, reports, wid)
+                        if r.usage_count > 0:
+                            all_results.append((model.name, r))
+        else:
+            result = get_impact_analysis(field_name, field_type, table_name, reports, wid)
+            if result.usage_count > 0:
+                all_results.append((model.name, result))
+
+    if not all_results:
+        model_count = len(lineages_to_search)
+        total_reports = sum(len(l.reports) for l in lineages_to_search)
+        return f"Field `{field_name}` is not used in any visual across {model_count} model(s), {total_reports} report(s)."
+
+    return _format_impact_results_multi(all_results)
 
 
 def _format_impact_results(results: list) -> str:
@@ -378,6 +388,25 @@ def _format_impact_results(results: list) -> str:
 
     for r in results:
         lines.append(f"## `{r.table_name}.{r.object_name}` ({r.object_type}) — {r.usage_count} usage(s)\n")
+        lines.append("| Report | Page | Visual | Type |")
+        lines.append("|--------|------|--------|------|")
+        for item in r.used_in:
+            title = item.visual_title or item.visual_type
+            lines.append(f"| {item.report_name} | {item.page_name} | {title} | {item.visual_type} |")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _format_impact_results_multi(results: list[tuple[str, Any]]) -> str:
+    """Format impact results from multiple models."""
+    lines: list[str] = []
+    total_usage = sum(r.usage_count for _, r in results)
+    model_names = sorted(set(m for m, _ in results))
+    lines.append(f"# Impact Analysis — {total_usage} visual(s) affected across {len(model_names)} model(s)\n")
+
+    for model_name, r in results:
+        lines.append(f"## [{model_name}] `{r.table_name}.{r.object_name}` ({r.object_type}) — {r.usage_count} usage(s)\n")
         lines.append("| Report | Page | Visual | Type |")
         lines.append("|--------|------|--------|------|")
         for item in r.used_in:
@@ -402,17 +431,23 @@ async def describe_semantic_model(
         dataset_id: Dataset ID (optional if you just ran generate_lineage).
 
     Returns detailed metadata about the semantic model structure.
+    If dataset_id is provided and was previously scanned, returns that specific model.
     """
-    global _last_lineage
+    global _last_lineage, _workspace_lineages
 
-    lineage = _last_lineage
+    # Look up specific model from cache if dataset_id provided
+    lineage = None
+    if dataset_id and dataset_id in _workspace_lineages:
+        lineage = _workspace_lineages[dataset_id]
+    elif _last_lineage:
+        lineage = _last_lineage
 
     if not lineage and workspace_id and dataset_id:
         await generate_lineage(workspace_id, dataset_id)
-        lineage = _last_lineage
+        lineage = _workspace_lineages.get(dataset_id) or _last_lineage
 
     if not lineage:
-        return "No lineage data available. Run `generate_lineage` first."
+        return "No lineage data available. Run `generate_lineage` or `generate_workspace_lineage` first."
 
     model = lineage.model
     lines: list[str] = []
