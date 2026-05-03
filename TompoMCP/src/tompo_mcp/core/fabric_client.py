@@ -268,7 +268,7 @@ class FabricClient:
     ) -> Optional[dict[str, Any]]:
         dax_queries = {
             "tables": "EVALUATE SELECTCOLUMNS(INFO.TABLES(), \"ID\", [ID], \"Name\", [Name], \"IsHidden\", [IsHidden], \"Description\", [Description])",
-            "columns": "EVALUATE SELECTCOLUMNS(INFO.COLUMNS(), \"TableID\", [TableID], \"ExplicitName\", [ExplicitName], \"InferredName\", [InferredName], \"ExplicitDataType\", [ExplicitDataType], \"IsHidden\", [IsHidden], \"Expression\", [Expression], \"Description\", [Description])",
+            "columns": "EVALUATE SELECTCOLUMNS(INFO.COLUMNS(), \"ID\", [ID], \"TableID\", [TableID], \"ExplicitName\", [ExplicitName], \"InferredName\", [InferredName], \"ExplicitDataType\", [ExplicitDataType], \"IsHidden\", [IsHidden], \"Expression\", [Expression], \"Description\", [Description])",
             "measures": "EVALUATE SELECTCOLUMNS(INFO.MEASURES(), \"TableID\", [TableID], \"Name\", [Name], \"Expression\", [Expression], \"FormatString\", [FormatString], \"Description\", [Description])",
             "relationships": "EVALUATE SELECTCOLUMNS(INFO.RELATIONSHIPS(), \"ID\", [ID], \"FromTableID\", [FromTableID], \"FromColumnID\", [FromColumnID], \"ToTableID\", [ToTableID], \"ToColumnID\", [ToColumnID], \"FromCardinality\", [FromCardinality], \"ToCardinality\", [ToCardinality], \"CrossFilteringBehavior\", [CrossFilteringBehavior], \"IsActive\", [IsActive])",
             "roles": "EVALUATE SELECTCOLUMNS(INFO.ROLES(), \"ID\", [ID], \"Name\", [Name], \"ModelPermission\", [ModelPermission], \"Description\", [Description])",
