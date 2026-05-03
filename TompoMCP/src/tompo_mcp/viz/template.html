@@ -441,17 +441,20 @@ function buildRelGraph() {
   relGraphBuilt = true;
   const panel = document.getElementById("rel-panel");
 
-  // Model selector for relationships
+  // Model selector for relationships — only show models with relationships first
+  const modelsWithRels = MODELS.map((m, i) => ({ m, i })).sort((a, b) => b.m.model.relationships.length - a.m.model.relationships.length);
   let html = `<div style="margin-bottom:12px;display:flex;gap:10px;align-items:center">
     <label style="font-weight:600;font-size:13px">Model:</label>
     <select id="relModelSel" onchange="renderRelGraph(+this.value)" style="padding:4px 8px;border:1px solid #d0d0d0;border-radius:4px;font-size:13px">`;
-  MODELS.forEach((m, i) => { html += `<option value="${i}">${esc(m.model.name)} (${m.model.relationships.length} rels)</option>`; });
+  modelsWithRels.forEach(({ m, i }) => { html += `<option value="${i}">${esc(m.model.name)} (${m.model.relationships.length} rels)</option>`; });
   html += `</select><span id="relStats" style="font-size:12px;color:#666"></span>
     <button class="btn-export" onclick="exportRelationshipsCSV()" style="margin-left:auto">&#x1F4E5; Export Relationships CSV</button>
   </div>`;
   html += `<svg id="rel-svg"></svg>`;
   panel.innerHTML = html;
-  renderRelGraph(0);
+  // Render first model that has relationships
+  const firstWithRels = modelsWithRels.find(x => x.m.model.relationships.length > 0);
+  renderRelGraph(firstWithRels ? firstWithRels.i : 0);
 }
 
 function renderRelGraph(modelIdx) {
@@ -461,10 +464,32 @@ function renderRelGraph(modelIdx) {
 
   document.getElementById("relStats").textContent = `${tables.length} tables, ${rels.length} relationships`;
 
-  // Build nodes and links
-  const tableNames = new Set(tables.map(t => t.name));
-  rels.forEach(r => { tableNames.add(r.from_table); tableNames.add(r.to_table); });
-  const nodes = [...tableNames].map(name => {
+  const svgEl = document.getElementById("rel-svg");
+  d3.select("#rel-svg").selectAll("*").remove();
+
+  // If no relationships, show friendly message
+  if (!rels || rels.length === 0) {
+    const width = svgEl.clientWidth || 900;
+    const height = svgEl.clientHeight || 500;
+    d3.select("#rel-svg").attr("viewBox", [0, 0, width, height])
+      .append("text").attr("x", width/2).attr("y", height/2)
+      .attr("text-anchor","middle").attr("font-size","16px").attr("fill","#888")
+      .text("No relationships found for this model. Try a different model from the dropdown.");
+    return;
+  }
+
+  // Normalize cardinality values (DAX returns numeric: 0=Many, 1=One, 2=None)
+  const cardMap = {'0':'Many','1':'One','2':'None','many':'Many','one':'One','none':'None','Many':'Many','One':'One'};
+  rels.forEach(r => {
+    r.from_cardinality = cardMap[String(r.from_cardinality)] || r.from_cardinality || '?';
+    r.to_cardinality = cardMap[String(r.to_cardinality)] || r.to_cardinality || '?';
+  });
+
+  // Only include tables that participate in at least one relationship
+  const participatingTables = new Set();
+  rels.forEach(r => { participatingTables.add(r.from_table); participatingTables.add(r.to_table); });
+
+  const nodes = [...participatingTables].map(name => {
     const tbl = tables.find(t => t.name === name);
     return { id: name, columns: tbl ? tbl.columns.length : 0, measures: tbl ? tbl.measures.length : 0 };
   });
@@ -472,50 +497,68 @@ function renderRelGraph(modelIdx) {
     source: r.from_table, target: r.to_table,
     fromCol: r.from_column, toCol: r.to_column,
     cardinality: `${r.from_cardinality}:${r.to_cardinality}`,
-    isActive: r.is_active
+    label: `${r.from_column} → ${r.to_column}`,
+    isActive: r.is_active !== false
   }));
 
-  const svgEl = document.getElementById("rel-svg");
   const width = svgEl.clientWidth || 900;
   const height = svgEl.clientHeight || 500;
 
-  d3.select("#rel-svg").selectAll("*").remove();
   const rSvg = d3.select("#rel-svg").attr("viewBox", [0, 0, width, height]);
+
+  // Zoom support
+  const gContainer = rSvg.append("g");
+  rSvg.call(d3.zoom().scaleExtent([0.2, 4]).on("zoom", e => gContainer.attr("transform", e.transform)));
 
   // Arrow marker
   rSvg.append("defs").append("marker").attr("id","arrowhead").attr("viewBox","0 -5 10 10")
-    .attr("refX",25).attr("refY",0).attr("markerWidth",6).attr("markerHeight",6).attr("orient","auto")
-    .append("path").attr("d","M0,-5L10,0L0,5").attr("fill","#999");
+    .attr("refX",30).attr("refY",0).attr("markerWidth",6).attr("markerHeight",6).attr("orient","auto")
+    .append("path").attr("d","M0,-5L10,0L0,5").attr("fill","#666");
+
+  // Adjust force params based on node count
+  const nodeCount = nodes.length;
+  const chargeStrength = nodeCount > 30 ? -200 : nodeCount > 15 ? -350 : -500;
+  const linkDist = nodeCount > 30 ? 120 : nodeCount > 15 ? 160 : 200;
 
   const simulation = d3.forceSimulation(nodes)
-    .force("link", d3.forceLink(links).id(d => d.id).distance(150))
-    .force("charge", d3.forceManyBody().strength(-400))
+    .force("link", d3.forceLink(links).id(d => d.id).distance(linkDist))
+    .force("charge", d3.forceManyBody().strength(chargeStrength))
     .force("center", d3.forceCenter(width/2, height/2))
-    .force("collision", d3.forceCollide(50));
+    .force("collision", d3.forceCollide(55))
+    .force("x", d3.forceX(width/2).strength(0.05))
+    .force("y", d3.forceY(height/2).strength(0.05));
 
-  const link = rSvg.append("g").selectAll("line").data(links).join("line")
+  const link = gContainer.append("g").selectAll("line").data(links).join("line")
     .attr("class", d => "rel-link" + (d.isActive ? "" : " inactive"))
     .attr("stroke-width", 2);
 
-  const linkLabel = rSvg.append("g").selectAll("text").data(links).join("text")
+  const linkLabel = gContainer.append("g").selectAll("text").data(links).join("text")
     .attr("class","rel-label").attr("text-anchor","middle")
-    .text(d => `${d.fromCol} → ${d.toCol} [${d.cardinality}]`);
+    .text(d => `${d.label} [${d.cardinality}]`);
 
-  const node = rSvg.append("g").selectAll("g").data(nodes).join("g").attr("class","rel-node")
+  const node = gContainer.append("g").selectAll("g").data(nodes).join("g").attr("class","rel-node")
     .call(d3.drag().on("start", dragStart).on("drag", dragging).on("end", dragEnd));
 
-  node.append("rect").attr("width",100).attr("height",36).attr("x",-50).attr("y",-18)
-    .attr("rx",6).attr("fill","#00b7c3").attr("stroke","#008a94").attr("stroke-width",1.5)
+  // Dynamic rect width based on name length
+  node.append("rect")
+    .attr("width", d => Math.max(80, d.id.length * 7.5 + 20))
+    .attr("height", 36)
+    .attr("x", d => -Math.max(80, d.id.length * 7.5 + 20)/2)
+    .attr("y", -18)
+    .attr("rx", 6).attr("fill","#00b7c3").attr("stroke","#008a94").attr("stroke-width",1.5)
     .attr("filter","drop-shadow(0 2px 4px rgba(0,0,0,0.15))");
 
   node.append("text").attr("dy","-2").attr("text-anchor","middle").attr("fill","#fff")
-    .text(d => truncate(d.id, 14));
+    .text(d => d.id.length > 18 ? d.id.slice(0,16)+"..." : d.id);
   node.append("text").attr("dy","12").attr("text-anchor","middle").attr("fill","#e0f7fa").attr("font-size","9px")
     .text(d => `${d.columns}C ${d.measures}M`);
 
+  // Tooltip on hover
+  node.append("title").text(d => `${d.id}\n${d.columns} columns, ${d.measures} measures`);
+
   simulation.on("tick", () => {
     link.attr("x1",d=>d.source.x).attr("y1",d=>d.source.y).attr("x2",d=>d.target.x).attr("y2",d=>d.target.y);
-    linkLabel.attr("x",d=>(d.source.x+d.target.x)/2).attr("y",d=>(d.source.y+d.target.y)/2 - 8);
+    linkLabel.attr("x",d=>(d.source.x+d.target.x)/2).attr("y",d=>(d.source.y+d.target.y)/2 - 10);
     node.attr("transform",d=>`translate(${d.x},${d.y})`);
   });
 
@@ -858,8 +901,10 @@ function updateWhatIfTables() {
   const mIdx = +document.getElementById("whatifModel").value;
   const tSel = document.getElementById("whatifTable");
   tSel.innerHTML = "";
-  MODELS[mIdx].model.tables.filter(t => !t.is_hidden).forEach(t => {
-    tSel.innerHTML += `<option value="${esc(t.name)}">${esc(t.name)}</option>`;
+  // Include ALL tables that have columns or measures (even hidden measure tables)
+  MODELS[mIdx].model.tables.filter(t => !t.is_hidden || t.measures.length > 0).forEach(t => {
+    const label = t.is_hidden ? `${t.name} (hidden)` : t.name;
+    tSel.innerHTML += `<option value="${esc(t.name)}">${esc(label)} — ${t.columns.length}C ${t.measures.length}M</option>`;
   });
   updateWhatIfFields();
 }
@@ -871,12 +916,27 @@ function updateWhatIfFields() {
   fSel.innerHTML = "";
   const tbl = MODELS[mIdx].model.tables.find(t => t.name === tName);
   if (!tbl) return;
+  // Show columns first
   tbl.columns.filter(c => !c.is_hidden).forEach(c => {
     fSel.innerHTML += `<option value="column|${esc(c.name)}">&#x1F539; ${esc(c.name)} [Column]</option>`;
   });
+  // Then measures
   tbl.measures.forEach(ms => {
     fSel.innerHTML += `<option value="measure|${esc(ms.name)}">&#x1F538; ${esc(ms.name)} [Measure]</option>`;
   });
+  // Also collect measures from ALL tables for this model (in case measures table is separate)
+  if (tbl.measures.length === 0) {
+    const allMeasures = [];
+    MODELS[mIdx].model.tables.forEach(t => {
+      t.measures.forEach(ms => { allMeasures.push({...ms, _fromTable: t.name}); });
+    });
+    if (allMeasures.length > 0 && fSel.options.length > 0) {
+      fSel.innerHTML += `<option disabled>── All Model Measures ──</option>`;
+      allMeasures.forEach(ms => {
+        fSel.innerHTML += `<option value="measure|${esc(ms.name)}">&#x1F538; ${esc(ms._fromTable)}.${esc(ms.name)} [Measure]</option>`;
+      });
+    }
+  }
 }
 
 function runWhatIf() {
