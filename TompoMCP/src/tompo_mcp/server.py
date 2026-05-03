@@ -1,12 +1,13 @@
 """
 TOMPo MCP Server — Power BI & Fabric Lineage Intelligence.
 
-Exposes 5 tools to AI assistants (GitHub Copilot, Claude, etc.):
-  1. list_workspaces       — List Fabric workspaces you have access to
-  2. generate_lineage      — Full lineage: model → tables → reports → visuals → fields
-  3. impact_analysis       — Where is a specific column/measure used?
-  4. describe_semantic_model — Tables, columns, measures, relationships, roles
-  5. export_lineage_html   — Generate interactive D3 visualization as HTML file
+Exposes 6 tools to AI assistants (GitHub Copilot, Claude, etc.):
+  1. list_workspaces            — List Fabric workspaces you have access to
+  2. generate_lineage           — Full lineage for ONE model: model → tables → reports → visuals → fields
+  3. generate_workspace_lineage — Full lineage for ALL models in a workspace (parallel, fast)
+  4. impact_analysis            — Where is a specific column/measure used?
+  5. describe_semantic_model    — Tables, columns, measures, relationships, roles
+  6. export_lineage_html        — Generate interactive D3 visualization as HTML file (all models)
 """
 
 from __future__ import annotations
@@ -40,6 +41,8 @@ _token_provider: TokenProvider | None = None
 _client: FabricClient | None = None
 _last_lineage: LineageResponse | None = None
 _last_workspace_id: str = ""
+# Accumulates all lineages per workspace (dataset_id → LineageResponse)
+_workspace_lineages: dict[str, LineageResponse] = {}
 
 
 def _get_client() -> FabricClient:
@@ -97,8 +100,9 @@ async def generate_lineage(
         dataset_name: Optional human name for the dataset (helps with display).
 
     Returns the lineage tree showing exactly which columns/measures appear in which visuals.
+    Tip: Use generate_workspace_lineage to scan ALL models in a workspace at once (faster).
     """
-    global _last_lineage, _last_workspace_id
+    global _last_lineage, _last_workspace_id, _workspace_lineages
     client = _get_client()
 
     # If no dataset_id, list available datasets
@@ -110,13 +114,13 @@ async def generate_lineage(
         lines = ["Available semantic models in this workspace:\n"]
         for ds in datasets:
             lines.append(f"  - **{ds.get('name', 'Unknown')}** (`{ds.get('id', '')}`)")
-        lines.append("\nUse the dataset ID to generate lineage.")
+        lines.append("\nUse `generate_workspace_lineage` to generate lineage for ALL models at once, or use the dataset ID here for a single model.")
         return "\n".join(lines)
 
     # Get semantic model definition
     raw_model = await client.get_semantic_model_definition(workspace_id, dataset_id)
     if not raw_model:
-        return f"Could not retrieve semantic model definition for dataset `{dataset_id}`. Check permissions."
+        return f"Could not retrieve semantic model definition for dataset `{dataset_id}`. This may be due to sensitivity labels (Confidential/Restricted) blocking access. Check permissions."
 
     model = parse_semantic_model(raw_model, dataset_id, dataset_name or dataset_id)
 
@@ -126,7 +130,8 @@ async def generate_lineage(
         lineage = build_lineage(model, [], workspace_id)
         _last_lineage = lineage
         _last_workspace_id = workspace_id
-        return f"Semantic model **{model.name}** has {len(model.tables)} tables but no reports are bound to it.\n\n" + _format_model_summary(model)
+        _workspace_lineages[dataset_id] = lineage
+        return f"Semantic model **{model.name}** has {len(model.tables)} tables but no reports are bound to it (orphaned model).\n\n" + _format_model_summary(model)
 
     # Get report definitions
     reports: list[ReportInfo] = []
@@ -144,8 +149,103 @@ async def generate_lineage(
     lineage = build_lineage(model, reports, workspace_id)
     _last_lineage = lineage
     _last_workspace_id = workspace_id
+    _workspace_lineages[dataset_id] = lineage
 
     return _format_lineage_tree(lineage)
+
+
+# ── Tool 2b: Generate Workspace Lineage (ALL models, parallel) ───────
+
+@mcp.tool()
+async def generate_workspace_lineage(
+    workspace_id: str,
+) -> str:
+    """Generate lineage for ALL semantic models in a workspace in one call (parallel, fast).
+
+    Args:
+        workspace_id: The workspace ID (from list_workspaces).
+
+    Scans every semantic model in the workspace, finds bound reports, and builds complete
+    lineage trees. Results are accumulated for export_lineage_html. Much faster than
+    calling generate_lineage multiple times.
+    """
+    global _last_lineage, _last_workspace_id, _workspace_lineages
+    client = _get_client()
+
+    items = await client.get_workspace_items(workspace_id)
+    datasets = items.get("datasets", [])
+    all_reports = items.get("reports", [])
+
+    if not datasets:
+        return "No semantic models found in this workspace."
+
+    # Reset workspace lineages for this workspace
+    _workspace_lineages = {}
+    _last_workspace_id = workspace_id
+
+    results: list[str] = []
+    errors: list[str] = []
+
+    # Process models with limited concurrency (3 at a time to avoid rate limits)
+    semaphore = asyncio.Semaphore(3)
+
+    async def _process_model(ds: dict) -> None:
+        ds_id = ds.get("id", "")
+        ds_name = ds.get("name", "Unknown")
+        async with semaphore:
+            try:
+                raw_model = await client.get_semantic_model_definition(workspace_id, ds_id)
+                if not raw_model:
+                    errors.append(f"⚠️ **{ds_name}** — could not retrieve definition (possibly Confidential/Restricted label)")
+                    return
+
+                model = parse_semantic_model(raw_model, ds_id, ds_name)
+
+                # Find reports bound to this dataset
+                bound_reports = [r for r in all_reports if r.get("datasetId") == ds_id]
+                reports: list[ReportInfo] = []
+                for rd in bound_reports:
+                    rid = rd.get("id", "")
+                    rname = rd.get("name", "Unknown")
+                    raw_report = await client.get_report_definition(workspace_id, rid)
+                    if raw_report:
+                        report = parse_report_definition(raw_report, rid, rname, ds_id)
+                        reports.append(report)
+                    else:
+                        reports.append(ReportInfo(id=rid, name=rname, dataset_id=ds_id))
+
+                lineage = build_lineage(model, reports, workspace_id)
+                _workspace_lineages[ds_id] = lineage
+
+                status = "Active" if reports else "Orphaned (no reports)"
+                results.append(f"✅ **{ds_name}** — {len(model.tables)} tables, {len(reports)} reports [{status}]")
+            except Exception as exc:
+                errors.append(f"❌ **{ds_name}** — error: {exc}")
+
+    await asyncio.gather(*[_process_model(ds) for ds in datasets])
+
+    # Set _last_lineage to the first one that has reports, or just the first one
+    for lineage in _workspace_lineages.values():
+        _last_lineage = lineage
+        if lineage.reports:
+            break
+
+    # Format summary
+    lines = [f"# Workspace Lineage Scan Complete\n"]
+    lines.append(f"**Models found:** {len(datasets)} | **Successfully scanned:** {len(results)} | **Errors:** {len(errors)}\n")
+
+    if results:
+        lines.append("## Scanned Models\n")
+        lines.extend(results)
+        lines.append("")
+
+    if errors:
+        lines.append("## Issues\n")
+        lines.extend(errors)
+        lines.append("")
+
+    lines.append(f"\n💡 Use `export_lineage_html` to generate an interactive visualization with ALL {len(_workspace_lineages)} models.")
+    return "\n".join(lines)
 
 
 def _format_lineage_tree(lineage: LineageResponse) -> str:
@@ -380,34 +480,44 @@ async def describe_semantic_model(
 async def export_lineage_html(
     output_path: str = "",
 ) -> str:
-    """Export the last generated lineage as an interactive D3 tree visualization (HTML file).
+    """Export ALL generated lineages as an interactive D3 tree visualization (HTML file).
 
     Args:
         output_path: File path to save HTML (default: auto-generated in current directory).
 
+    The HTML includes a model selector dropdown when multiple models are scanned.
     Opens the visualization in your default browser. The HTML file is self-contained
     with all JavaScript/CSS inlined — no server needed, works offline.
 
-    Run generate_lineage first to populate the lineage data.
+    Run generate_lineage or generate_workspace_lineage first to populate the lineage data.
     """
-    global _last_lineage
+    global _workspace_lineages, _last_lineage
 
-    if not _last_lineage:
-        return "No lineage data available. Run `generate_lineage` first."
+    # Collect all lineages
+    all_lineages = list(_workspace_lineages.values()) if _workspace_lineages else (
+        [_last_lineage] if _last_lineage else []
+    )
 
-    lineage_json = _last_lineage.model_dump()
+    if not all_lineages:
+        return "No lineage data available. Run `generate_workspace_lineage` or `generate_lineage` first."
+
+    # Serialize all lineages as an array
+    lineages_json = [l.model_dump() for l in all_lineages]
 
     # Load HTML template
     template_path = os.path.join(os.path.dirname(__file__), "viz", "template.html")
     with open(template_path, "r", encoding="utf-8") as f:
         template = f.read()
 
-    # Inject lineage data
-    html = template.replace("__LINEAGE_DATA_PLACEHOLDER__", json.dumps(lineage_json, default=str))
+    # Inject lineage data (array of all models)
+    html = template.replace("__LINEAGE_DATA_PLACEHOLDER__", json.dumps(lineages_json, default=str))
 
     # Determine output path
     if not output_path:
-        model_name = _last_lineage.model.name.replace(" ", "_").replace("/", "_")
+        # Use first model name or workspace
+        model_name = all_lineages[0].model.name.replace(" ", "_").replace("/", "_")
+        if len(all_lineages) > 1:
+            model_name = f"workspace_{len(all_lineages)}_models"
         output_path = os.path.join(os.getcwd(), f"lineage_{model_name}.html")
 
     # Validate output path — prevent path traversal
@@ -415,16 +525,24 @@ async def export_lineage_html(
     if not output_path.endswith(".html"):
         return "Error: output_path must end with .html"
 
+    # Ensure parent directory exists (fixes Errno 2)
+    parent_dir = os.path.dirname(output_path)
+    os.makedirs(parent_dir, exist_ok=True)
+
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
 
     # Open in browser
     try:
-        webbrowser.open(f"file://{os.path.abspath(output_path)}")
+        webbrowser.open(f"file://{output_path}")
     except Exception:
         pass
 
-    return f"Interactive lineage visualization saved to `{output_path}` and opened in browser."
+    model_names = [l.model.name for l in all_lineages]
+    return (
+        f"Interactive lineage visualization saved to `{output_path}` and opened in browser.\n"
+        f"Contains {len(all_lineages)} model(s): {', '.join(model_names)}"
+    )
 
 
 # ── Server entry point ───────────────────────────────────────────────
