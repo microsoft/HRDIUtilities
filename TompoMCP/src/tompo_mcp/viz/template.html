@@ -585,17 +585,21 @@ function renderRelGraph(modelIdx) {
   });
 
   // Detect orphaned columns/measures (not used in any visual)
-  const usedFields = new Set(rows.map(r => r.model + "|" + r.table + "|" + r.field + "|" + r.type));
+  // Use model|table|field keys (ignore field_type — parser may misclassify measures as columns)
+  const usedFieldsByTableField = new Set(rows.map(r => r.model + "|" + r.table + "|" + r.field));
+  // Also track just model|field for measures (they are globally unique per model)
+  const usedFieldsByName = new Set(rows.map(r => r.model + "|" + r.field));
   const orphanFields = [];
   MODELS.forEach(mData => {
     mData.model.tables.filter(t => !t.is_hidden).forEach(tbl => {
       tbl.columns.filter(c => !c.is_hidden).forEach(c => {
-        const key = mData.model.name + "|" + tbl.name + "|" + c.name + "|column";
-        if (!usedFields.has(key)) orphanFields.push({ model: mData.model.name, table: tbl.name, field: c.name, type: "column" });
+        const key = mData.model.name + "|" + tbl.name + "|" + c.name;
+        if (!usedFieldsByTableField.has(key)) orphanFields.push({ model: mData.model.name, table: tbl.name, field: c.name, type: "column" });
       });
       tbl.measures.forEach(ms => {
-        const key = mData.model.name + "|" + tbl.name + "|" + ms.name + "|measure";
-        if (!usedFields.has(key)) orphanFields.push({ model: mData.model.name, table: tbl.name, field: ms.name, type: "measure" });
+        // Measures are unique per model — check by name regardless of table
+        const nameKey = mData.model.name + "|" + ms.name;
+        if (!usedFieldsByName.has(nameKey)) orphanFields.push({ model: mData.model.name, table: tbl.name, field: ms.name, type: "measure" });
       });
     });
   });
@@ -636,10 +640,10 @@ function renderRelGraph(modelIdx) {
     ${orphanFields.length > 0 ? `<div class="orphan-section">
       <h3>&#x26A0;&#xFE0F; Stale Field Detector — ${orphanFields.length} Unused Fields</h3>
       <div class="stale-summary">
-        <span class="pct">${((orphanFields.length / (usedFields.size + orphanFields.length)) * 100).toFixed(1)}%</span>
+        <span class="pct">${((orphanFields.length / (usedFieldsByTableField.size + orphanFields.length)) * 100).toFixed(1)}%</span>
         <span style="font-size:13px;color:#555;margin-left:8px">of all fields are never used in any report visual (dead weight)</span>
         <div style="margin-top:6px;font-size:12px;color:#666">
-          ${orphanFields.length} stale out of ${usedFields.size + orphanFields.length} total fields across ${MODELS.length} model(s).
+          ${orphanFields.length} stale out of ${usedFieldsByTableField.size + orphanFields.length} total fields across ${MODELS.length} model(s).
           Stale fields slow refresh, confuse users, and waste storage.
         </div>
       </div>
@@ -732,16 +736,15 @@ function buildDependencyIndex() {
   const idx = { fields: [], measures: [], visuals: [] };
   MODELS.forEach(mData => {
     const modelName = mData.model.name;
-    // Index all columns and measures
-    mData.model.tables.filter(t => !t.is_hidden).forEach(tbl => {
-      tbl.columns.filter(c => !c.is_hidden).forEach(c => {
-        idx.fields.push({ model: modelName, table: tbl.name, name: c.name, type: "column" });
-      });
+    // Index all columns and measures (include hidden tables for measures)
+    mData.model.tables.forEach(tbl => {
+      if (!tbl.is_hidden) {
+        tbl.columns.filter(c => !c.is_hidden).forEach(c => {
+          idx.fields.push({ model: modelName, table: tbl.name, name: c.name, type: "column" });
+        });
+      }
       tbl.measures.forEach(ms => {
         idx.fields.push({ model: modelName, table: tbl.name, name: ms.name, type: "measure", expression: ms.expression });
-      });
-      // Store measures separately for DAX dependency parsing
-      tbl.measures.forEach(ms => {
         idx.measures.push({ model: modelName, table: tbl.name, name: ms.name, expression: ms.expression || "" });
       });
     });
@@ -779,7 +782,14 @@ function findDependentMeasures(fieldName, tableName, modelName, allMeasures) {
 }
 
 function findAffectedVisuals(fieldName, tableName, fieldType, modelName, allVisuals) {
-  return allVisuals.filter(v => v.model === modelName && v.field === fieldName && v.table === tableName && v.fieldType === fieldType);
+  // Match by name + table + model; also match by name alone for measures (they are globally unique in a model)
+  return allVisuals.filter(v => {
+    if (v.model !== modelName) return false;
+    if (v.field === fieldName && v.table === tableName) return true;
+    // Measures are unique per model — match by name regardless of table (parser may record different table)
+    if (fieldType === "measure" && v.field === fieldName) return true;
+    return false;
+  });
 }
 
 function simulateDeletion(fieldName, tableName, fieldType, modelName) {
@@ -995,13 +1005,15 @@ function exportImpactCSV() {
 
 function exportStaleCSV() {
   const rows = [];
-  const usedFields = new Set();
+  const usedByTableField = new Set();
+  const usedByName = new Set();
   MODELS.forEach(mData => {
     (mData.reports||[]).forEach(r => {
       (r.pages||[]).forEach(pg => {
         (pg.visuals||[]).forEach(v => {
           (v.field_bindings||[]).forEach(fb => {
-            usedFields.add(mData.model.name + "|" + fb.table_name + "|" + fb.field_name + "|" + fb.field_type);
+            usedByTableField.add(mData.model.name + "|" + fb.table_name + "|" + fb.field_name);
+            usedByName.add(mData.model.name + "|" + fb.field_name);
           });
         });
       });
@@ -1010,12 +1022,12 @@ function exportStaleCSV() {
   MODELS.forEach(mData => {
     mData.model.tables.filter(t => !t.is_hidden).forEach(tbl => {
       tbl.columns.filter(c => !c.is_hidden).forEach(c => {
-        const key = mData.model.name + "|" + tbl.name + "|" + c.name + "|column";
-        if (!usedFields.has(key)) rows.push([mData.model.name, tbl.name, c.name, "column"]);
+        const key = mData.model.name + "|" + tbl.name + "|" + c.name;
+        if (!usedByTableField.has(key)) rows.push([mData.model.name, tbl.name, c.name, "column"]);
       });
       tbl.measures.forEach(ms => {
-        const key = mData.model.name + "|" + tbl.name + "|" + ms.name + "|measure";
-        if (!usedFields.has(key)) rows.push([mData.model.name, tbl.name, ms.name, "measure"]);
+        const nameKey = mData.model.name + "|" + ms.name;
+        if (!usedByName.has(nameKey)) rows.push([mData.model.name, tbl.name, ms.name, "measure"]);
       });
     });
   });
