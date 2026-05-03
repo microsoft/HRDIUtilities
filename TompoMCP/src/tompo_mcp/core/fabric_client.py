@@ -31,6 +31,17 @@ class FabricClient:
         self._tp = token_provider
         self._pbi_base = PBI_BASE
         self._fabric_base = FABRIC_BASE
+        self._client: Optional[httpx.AsyncClient] = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Get or create a shared httpx client (connection pooling)."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=REQUEST_TIMEOUT)
+        return self._client
+
+    async def close(self) -> None:
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
 
     def _pbi_headers(self) -> dict[str, str]:
         return {
@@ -47,35 +58,35 @@ class FabricClient:
     # ── Workspace Operations ──────────────────────────────────────────
 
     async def list_workspaces(self) -> list[dict[str, Any]]:
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            resp = await client.get(
-                f"{self._pbi_base}/groups",
-                headers=self._pbi_headers(),
-                params={"$top": 1000},
-            )
-            resp.raise_for_status()
-            return resp.json().get("value", [])
+        client = await self._get_client()
+        resp = await client.get(
+            f"{self._pbi_base}/groups",
+            headers=self._pbi_headers(),
+            params={"$top": 1000},
+        )
+        resp.raise_for_status()
+        return resp.json().get("value", [])
 
     async def get_workspace_items(
         self, workspace_id: str
     ) -> dict[str, list[dict[str, Any]]]:
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            datasets_resp, reports_resp = await asyncio.gather(
-                client.get(
-                    f"{self._pbi_base}/groups/{workspace_id}/datasets",
-                    headers=self._pbi_headers(),
-                ),
-                client.get(
-                    f"{self._pbi_base}/groups/{workspace_id}/reports",
-                    headers=self._pbi_headers(),
-                ),
-            )
-            datasets_resp.raise_for_status()
-            reports_resp.raise_for_status()
-            return {
-                "datasets": datasets_resp.json().get("value", []),
-                "reports": reports_resp.json().get("value", []),
-            }
+        client = await self._get_client()
+        datasets_resp, reports_resp = await asyncio.gather(
+            client.get(
+                f"{self._pbi_base}/groups/{workspace_id}/datasets",
+                headers=self._pbi_headers(),
+            ),
+            client.get(
+                f"{self._pbi_base}/groups/{workspace_id}/reports",
+                headers=self._pbi_headers(),
+            ),
+        )
+        datasets_resp.raise_for_status()
+        reports_resp.raise_for_status()
+        return {
+            "datasets": datasets_resp.json().get("value", []),
+            "reports": reports_resp.json().get("value", []),
+        }
 
     # ── Semantic Model Definition ─────────────────────────────────────
 
@@ -116,20 +127,20 @@ class FabricClient:
         self, workspace_id: str, item_type: str, item_id: str
     ) -> Optional[dict[str, Any]]:
         try:
-            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-                url = f"{self._fabric_base}/workspaces/{workspace_id}/{item_type}/{item_id}/getDefinition"
-                resp = await client.post(url, headers=self._fabric_headers())
+            client = await self._get_client()
+            url = f"{self._fabric_base}/workspaces/{workspace_id}/{item_type}/{item_id}/getDefinition"
+            resp = await client.post(url, headers=self._fabric_headers())
 
-                if resp.status_code == 200:
-                    return self._decode_definition_parts(resp.json())
-                if resp.status_code == 202:
-                    return await self._poll_long_running_operation(client, resp)
+            if resp.status_code == 200:
+                return self._decode_definition_parts(resp.json())
+            if resp.status_code == 202:
+                return await self._poll_long_running_operation(client, resp)
 
-                logger.warning(
-                    "getDefinition returned %d for %s/%s",
-                    resp.status_code, item_type, item_id,
-                )
-                return None
+            logger.warning(
+                "getDefinition returned %d for %s/%s",
+                resp.status_code, item_type, item_id,
+            )
+            return None
         except Exception as exc:
             logger.warning("Fabric getDefinition failed: %s", exc)
             return None
@@ -205,47 +216,47 @@ class FabricClient:
         self, workspace_id: str, dataset_id: str
     ) -> Optional[dict[str, Any]]:
         try:
-            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-                scan_resp = await client.post(
-                    f"{self._pbi_base}/admin/workspaces/getInfo",
-                    headers=self._pbi_headers(),
-                    params={"datasetSchema": "true", "datasetExpressions": "true"},
-                    json={"workspaces": [workspace_id]},
-                )
+            client = await self._get_client()
+            scan_resp = await client.post(
+                f"{self._pbi_base}/admin/workspaces/getInfo",
+                headers=self._pbi_headers(),
+                params={"datasetSchema": "true", "datasetExpressions": "true"},
+                json={"workspaces": [workspace_id]},
+            )
 
-                if scan_resp.status_code != 202:
-                    logger.warning("Scanner API trigger returned %d", scan_resp.status_code)
-                    return None
-
-                scan_id = scan_resp.json().get("id")
-                if not scan_id:
-                    return None
-
-                for _ in range(MAX_POLL_ATTEMPTS):
-                    await asyncio.sleep(POLL_INTERVAL)
-                    status_resp = await client.get(
-                        f"{self._pbi_base}/admin/workspaces/scanStatus/{scan_id}",
-                        headers=self._pbi_headers(),
-                    )
-                    status = status_resp.json()
-                    if status.get("status") == "Succeeded":
-                        break
-                else:
-                    logger.error("Scanner API timed out")
-                    return None
-
-                result_resp = await client.get(
-                    f"{self._pbi_base}/admin/workspaces/scanResult/{scan_id}",
-                    headers=self._pbi_headers(),
-                )
-                result_resp.raise_for_status()
-                scan_result = result_resp.json()
-
-                for ws in scan_result.get("workspaces", []):
-                    for ds in ws.get("datasets", []):
-                        if ds.get("id") == dataset_id:
-                            return {"_source": "scanner", "dataset": ds}
+            if scan_resp.status_code != 202:
+                logger.warning("Scanner API trigger returned %d", scan_resp.status_code)
                 return None
+
+            scan_id = scan_resp.json().get("id")
+            if not scan_id:
+                return None
+
+            for _ in range(MAX_POLL_ATTEMPTS):
+                await asyncio.sleep(POLL_INTERVAL)
+                status_resp = await client.get(
+                    f"{self._pbi_base}/admin/workspaces/scanStatus/{scan_id}",
+                    headers=self._pbi_headers(),
+                )
+                status = status_resp.json()
+                if status.get("status") == "Succeeded":
+                    break
+            else:
+                logger.error("Scanner API timed out")
+                return None
+
+            result_resp = await client.get(
+                f"{self._pbi_base}/admin/workspaces/scanResult/{scan_id}",
+                headers=self._pbi_headers(),
+            )
+            result_resp.raise_for_status()
+            scan_result = result_resp.json()
+
+            for ws in scan_result.get("workspaces", []):
+                for ds in ws.get("datasets", []):
+                    if ds.get("id") == dataset_id:
+                        return {"_source": "scanner", "dataset": ds}
+            return None
         except Exception as exc:
             logger.warning("Admin Scanner API failed: %s", exc)
             return None
@@ -265,27 +276,27 @@ class FabricClient:
 
         try:
             results: dict[str, Any] = {"_source": "dax"}
-            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-                for key, dax in dax_queries.items():
-                    resp = await client.post(
-                        f"{self._pbi_base}/groups/{workspace_id}/datasets/{dataset_id}/executeQueries",
-                        headers=self._pbi_headers(),
-                        json={
-                            "queries": [{"query": dax}],
-                            "serializerSettings": {"includeNulls": True},
-                        },
+            client = await self._get_client()
+            for key, dax in dax_queries.items():
+                resp = await client.post(
+                    f"{self._pbi_base}/groups/{workspace_id}/datasets/{dataset_id}/executeQueries",
+                    headers=self._pbi_headers(),
+                    json={
+                        "queries": [{"query": dax}],
+                        "serializerSettings": {"includeNulls": True},
+                    },
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    rows = (
+                        data.get("results", [{}])[0]
+                        .get("tables", [{}])[0]
+                        .get("rows", [])
                     )
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        rows = (
-                            data.get("results", [{}])[0]
-                            .get("tables", [{}])[0]
-                            .get("rows", [])
-                        )
-                        results[key] = rows
-                    else:
-                        logger.warning("DAX query for '%s' returned %d", key, resp.status_code)
-                        results[key] = []
+                    results[key] = rows
+                else:
+                    logger.warning("DAX query for '%s' returned %d", key, resp.status_code)
+                    results[key] = []
 
             return results if any(results.get(k) for k in dax_queries) else None
         except Exception as exc:
@@ -318,14 +329,14 @@ class FabricClient:
         self, workspace_id: str, report_id: str
     ) -> Optional[list[dict[str, Any]]]:
         try:
-            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-                resp = await client.get(
-                    f"{self._pbi_base}/groups/{workspace_id}/reports/{report_id}/pages",
-                    headers=self._pbi_headers(),
-                )
-                if resp.status_code == 200:
-                    return resp.json().get("value", [])
-                return None
+            client = await self._get_client()
+            resp = await client.get(
+                f"{self._pbi_base}/groups/{workspace_id}/reports/{report_id}/pages",
+                headers=self._pbi_headers(),
+            )
+            if resp.status_code == 200:
+                return resp.json().get("value", [])
+            return None
         except Exception as exc:
             logger.warning("Pages API fallback failed: %s", exc)
             return None
@@ -336,25 +347,25 @@ class FabricClient:
         self, workspace_id: str, artifact_type: str, artifact_id: str
     ) -> Optional[dict[str, Any]]:
         try:
-            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-                if artifact_type == "datasets":
-                    url = f"{self._pbi_base}/admin/datasets/{artifact_id}"
-                elif artifact_type == "reports":
-                    url = f"{self._pbi_base}/admin/reports/{artifact_id}"
-                else:
-                    return None
-
-                resp = await client.get(url, headers=self._pbi_headers())
-                if resp.status_code == 200:
-                    data = resp.json()
-                    label = data.get("sensitivityLabel")
-                    if label:
-                        return {
-                            "labelId": label.get("labelId"),
-                            "labelName": label.get("labelId"),
-                        }
-                    return None
+            client = await self._get_client()
+            if artifact_type == "datasets":
+                url = f"{self._pbi_base}/admin/datasets/{artifact_id}"
+            elif artifact_type == "reports":
+                url = f"{self._pbi_base}/admin/reports/{artifact_id}"
+            else:
                 return None
+
+            resp = await client.get(url, headers=self._pbi_headers())
+            if resp.status_code == 200:
+                data = resp.json()
+                label = data.get("sensitivityLabel")
+                if label:
+                    return {
+                        "labelId": label.get("labelId"),
+                        "labelName": label.get("labelId"),
+                    }
+                return None
+            return None
         except Exception as exc:
             logger.warning("Failed to get sensitivity label: %s", exc)
             return None
@@ -364,22 +375,22 @@ class FabricClient:
             return self._general_label_id_cache
 
         try:
-            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-                headers = {
-                    "Authorization": f"Bearer {self._tp.get_graph_token()}",
-                    "Content-Type": "application/json",
-                }
-                resp = await client.get(
-                    "https://graph.microsoft.com/v1.0/informationProtection/policy/labels",
-                    headers=headers,
-                )
-                if resp.status_code == 200:
-                    labels = resp.json().get("value", [])
-                    for lbl in labels:
-                        name = (lbl.get("name") or "").lower()
-                        if name in ("general", "public"):
-                            self._general_label_id_cache = lbl["id"]
-                            return self._general_label_id_cache
+            client = await self._get_client()
+            headers = {
+                "Authorization": f"Bearer {self._tp.get_graph_token()}",
+                "Content-Type": "application/json",
+            }
+            resp = await client.get(
+                "https://graph.microsoft.com/v1.0/informationProtection/policy/labels",
+                headers=headers,
+            )
+            if resp.status_code == 200:
+                labels = resp.json().get("value", [])
+                for lbl in labels:
+                    name = (lbl.get("name") or "").lower()
+                    if name in ("general", "public"):
+                        self._general_label_id_cache = lbl["id"]
+                        return self._general_label_id_cache
         except Exception as exc:
             logger.warning("Failed to discover General label ID: %s", exc)
 
@@ -400,18 +411,18 @@ class FabricClient:
                 "labelId": label_id,
                 "assignmentMethod": "Standard",
             }
-            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-                resp = await client.post(
-                    f"{self._pbi_base}/admin/informationprotection/setLabels",
-                    headers=self._pbi_headers(),
-                    json=payload,
-                )
-                if resp.status_code == 200:
-                    result = resp.json()
-                    items = result.get(field, [])
-                    if items and items[0].get("status") == "Succeeded":
-                        return True
-                return False
+            client = await self._get_client()
+            resp = await client.post(
+                f"{self._pbi_base}/admin/informationprotection/setLabels",
+                headers=self._pbi_headers(),
+                json=payload,
+            )
+            if resp.status_code == 200:
+                result = resp.json()
+                items = result.get(field, [])
+                if items and items[0].get("status") == "Succeeded":
+                    return True
+            return False
         except Exception as exc:
             logger.warning("Failed to set sensitivity label: %s", exc)
             return False
