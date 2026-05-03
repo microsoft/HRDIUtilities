@@ -29,7 +29,7 @@
   .node:hover circle { filter: brightness(1.15); }
   .node text { pointer-events: none; }
   .link { fill: none; stroke: #c0c0c0; stroke-width: 1.5; stroke-opacity: .5; }
-  #impact-panel, #model-panel { display: none; padding: 16px; overflow: auto; max-height: calc(100vh - 160px); }
+  #impact-panel, #model-panel, #rel-panel { display: none; padding: 16px; overflow: auto; max-height: calc(100vh - 160px); }
   table.data-grid { width: 100%; border-collapse: collapse; font-size: 13px; }
   table.data-grid th { background: #f3f3f3; text-align: left; padding: 8px 10px; border-bottom: 2px solid #d0d0d0; position: sticky; top: 0; }
   table.data-grid td { padding: 6px 10px; border-bottom: 1px solid #eee; }
@@ -38,6 +38,7 @@
   .badge-col { background: #e8daef; color: #6c3483; }
   .badge-meas { background: #fadbd8; color: #922b21; }
   .badge-model { background: #d4e6f1; color: #1b4f72; }
+  .badge-orphan { background: #fff3e0; color: #e65100; }
   .search-box { padding: 6px 12px; border: 1px solid #d0d0d0; border-radius: 4px; font-size: 13px; width: 280px; }
   .stats { display: flex; gap: 16px; margin-bottom: 12px; flex-wrap: wrap; }
   .stat-card { background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 10px 16px; text-align: center; min-width: 100px; }
@@ -48,9 +49,23 @@
   .fullscreen #main { height: 100vh; }
   .filter-bar { display: flex; gap: 10px; align-items: center; padding: 8px 16px; background: #f8f8f8; border-bottom: 1px solid #e8e8e8; flex-wrap: wrap; }
   .filter-bar label { font-size: 12px; font-weight: 600; color: #555; }
-  .filter-bar select { padding: 4px 8px; border: 1px solid #d0d0d0; border-radius: 4px; font-size: 12px; min-width: 140px; }
+  .filter-bar select { padding: 4px 8px; border: 1px solid #d0d0d0; border-radius: 4px; font-size: 12px; min-width: 120px; }
+  .filter-bar input { padding: 4px 8px; border: 1px solid #d0d0d0; border-radius: 4px; font-size: 12px; width: 160px; }
   .model-chip { display: inline-block; background: #e8f4fd; border: 1px solid #0078d4; color: #0078d4; padding: 2px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; margin: 2px; }
   .model-chip.orphaned { background: #fff3e0; border-color: #e65100; color: #e65100; }
+  .highlight circle { filter: drop-shadow(0 0 6px #ffab00) drop-shadow(0 0 12px #ffab00) !important; }
+  .highlight text.label { fill: #e65100 !important; font-weight: 700 !important; }
+  .dim { opacity: 0.2 !important; }
+  /* Relationship graph */
+  #rel-svg { width: 100%; height: calc(100vh - 240px); min-height: 400px; border: 1px solid #e0e0e0; border-radius: 6px; background: #fff; }
+  .rel-link { stroke: #999; stroke-opacity: 0.6; marker-end: url(#arrowhead); }
+  .rel-link.inactive { stroke-dasharray: 5 3; stroke: #ccc; }
+  .rel-node { cursor: pointer; }
+  .rel-node text { font-size: 11px; font-weight: 600; pointer-events: none; }
+  .rel-label { font-size: 9px; fill: #666; }
+  /* Orphan detection */
+  .orphan-section { margin-top: 16px; padding: 12px; background: #fff8e1; border: 1px solid #ffe082; border-radius: 6px; }
+  .orphan-section h3 { font-size: 14px; color: #e65100; margin-bottom: 8px; }
 </style>
 </head>
 <body>
@@ -66,6 +81,7 @@
   <div id="tabs">
     <div class="tab active" data-tab="tree">Lineage Tree</div>
     <div class="tab" data-tab="impact">Impact Analysis</div>
+    <div class="tab" data-tab="rel">Relationships</div>
     <div class="tab" data-tab="model">Semantic Models</div>
   </div>
   <div class="filter-bar" id="filter-bar">
@@ -75,6 +91,13 @@
     <select id="reportSelector" onchange="onReportFilter(this.value)"></select>
     <label>Page:</label>
     <select id="pageSelector" onchange="onPageFilter(this.value)"></select>
+    <label>Visual:</label>
+    <select id="visualTypeSelector" onchange="onVisualTypeFilter(this.value)"></select>
+    <label>Table:</label>
+    <select id="tableSelector" onchange="onTableFilter(this.value)"></select>
+    <span style="margin-left:8px"></span>
+    <label>Search:</label>
+    <input id="treeSearch" type="text" placeholder="Column or measure name..." oninput="onTreeSearch(this.value)">
   </div>
   <div id="toolbar">
     <div id="legend"></div>
@@ -92,15 +115,14 @@
   </div>
   <div id="tree-panel"></div>
   <div id="impact-panel"></div>
+  <div id="rel-panel"></div>
   <div id="model-panel"></div>
 </div>
 
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
-// ── DATA (array of LineageResponse objects) ───────────────────────
+// ── DATA ──────────────────────────────────────────────────────────
 const ALL_DATA = __LINEAGE_DATA_PLACEHOLDER__;
-
-// Normalize: support both single object (legacy) and array format
 const MODELS = Array.isArray(ALL_DATA) ? ALL_DATA : [ALL_DATA];
 
 const NODE_COLORS = {
@@ -115,9 +137,12 @@ const SIZES = { workspace: 12, model: 10, table: 8, report: 8, page: 7, visual: 
 
 let currentFontSize = 12;
 let treeRoot;
-let currentModelIndex = -1; // -1 means "All Models"
+let currentModelIndex = -1;
 let currentReportFilter = "";
 let currentPageFilter = "";
+let currentVisualTypeFilter = "";
+let currentTableFilter = "";
+let currentSearchTerm = "";
 
 // ── LEGEND ────────────────────────────────────────────────────────
 const legendEl = document.getElementById("legend");
@@ -134,9 +159,11 @@ document.querySelectorAll(".tab").forEach(tab => {
     const which = tab.dataset.tab;
     document.getElementById("tree-panel").style.display = which === "tree" ? "block" : "none";
     document.getElementById("impact-panel").style.display = which === "impact" ? "block" : "none";
+    document.getElementById("rel-panel").style.display = which === "rel" ? "block" : "none";
     document.getElementById("model-panel").style.display = which === "model" ? "block" : "none";
     document.getElementById("toolbar").style.display = which === "tree" ? "flex" : "none";
-    document.getElementById("filter-bar").style.display = which === "tree" ? "flex" : "none";
+    document.getElementById("filter-bar").style.display = (which === "tree") ? "flex" : "none";
+    if (which === "rel") buildRelGraph();
   });
 });
 
@@ -145,16 +172,16 @@ const totalTables = MODELS.reduce((s, m) => s + m.model.tables.length, 0);
 const totalReports = MODELS.reduce((s, m) => s + m.reports.length, 0);
 document.getElementById("model-title").textContent = `${MODELS.length} model(s) — ${totalTables} tables, ${totalReports} reports`;
 
-// ── MODEL SELECTOR DROPDOWN ───────────────────────────────────────
+// ── SELECTORS ─────────────────────────────────────────────────────
 const modelSel = document.getElementById("modelSelector");
 const reportSel = document.getElementById("reportSelector");
 const pageSel = document.getElementById("pageSelector");
+const visualTypeSel = document.getElementById("visualTypeSelector");
+const tableSel = document.getElementById("tableSelector");
 
 function populateModelSelector() {
   modelSel.innerHTML = "";
-  if (MODELS.length > 1) {
-    modelSel.innerHTML += `<option value="-1">All Models (${MODELS.length})</option>`;
-  }
+  if (MODELS.length > 1) modelSel.innerHTML += `<option value="-1">All Models (${MODELS.length})</option>`;
   MODELS.forEach((m, i) => {
     const rCount = m.reports.length;
     const status = rCount > 0 ? `${rCount} reports` : "orphaned";
@@ -167,12 +194,7 @@ function populateReportSelector() {
   const models = currentModelIndex === -1 ? MODELS : [MODELS[currentModelIndex]];
   const seen = new Set();
   models.forEach(m => {
-    m.reports.forEach(r => {
-      if (!seen.has(r.id)) {
-        seen.add(r.id);
-        reportSel.innerHTML += `<option value="${esc(r.id)}">${esc(r.name)}</option>`;
-      }
-    });
+    m.reports.forEach(r => { if (!seen.has(r.id)) { seen.add(r.id); reportSel.innerHTML += `<option value="${esc(r.id)}">${esc(r.name)}</option>`; } });
   });
 }
 
@@ -183,94 +205,82 @@ function populatePageSelector() {
   models.forEach(m => {
     m.reports.forEach(r => {
       if (currentReportFilter && r.id !== currentReportFilter) return;
-      (r.pages||[]).forEach(pg => {
-        const key = r.id + "/" + pg.name;
-        if (!seen.has(key)) {
-          seen.add(key);
-          pageSel.innerHTML += `<option value="${esc(key)}">${esc(pg.display_name)}</option>`;
-        }
-      });
+      (r.pages||[]).forEach(pg => { const key = r.id+"/"+pg.name; if (!seen.has(key)) { seen.add(key); pageSel.innerHTML += `<option value="${esc(key)}">${esc(pg.display_name)}</option>`; } });
     });
   });
 }
 
-function onModelSelect(val) {
-  currentModelIndex = parseInt(val);
-  currentReportFilter = "";
-  currentPageFilter = "";
-  populateReportSelector();
-  populatePageSelector();
-  rebuildTree();
+function populateVisualTypeSelector() {
+  visualTypeSel.innerHTML = `<option value="">All Visuals</option>`;
+  const models = currentModelIndex === -1 ? MODELS : [MODELS[currentModelIndex]];
+  const types = new Set();
+  models.forEach(m => {
+    m.reports.forEach(r => { (r.pages||[]).forEach(pg => { (pg.visuals||[]).forEach(v => { types.add(v.visual_type); }); }); });
+  });
+  [...types].sort().forEach(t => { visualTypeSel.innerHTML += `<option value="${esc(t)}">${esc(t)}</option>`; });
 }
 
-function onReportFilter(val) {
-  currentReportFilter = val;
-  currentPageFilter = "";
-  populatePageSelector();
-  rebuildTree();
+function populateTableSelector() {
+  tableSel.innerHTML = `<option value="">All Tables</option>`;
+  const models = currentModelIndex === -1 ? MODELS : [MODELS[currentModelIndex]];
+  const seen = new Set();
+  models.forEach(m => {
+    m.model.tables.filter(t => !t.is_hidden).forEach(t => { if (!seen.has(t.name)) { seen.add(t.name); tableSel.innerHTML += `<option value="${esc(t.name)}">${esc(t.name)}</option>`; } });
+  });
 }
 
-function onPageFilter(val) {
-  currentPageFilter = val;
-  rebuildTree();
-}
+function onModelSelect(val) { currentModelIndex = parseInt(val); currentReportFilter = ""; currentPageFilter = ""; currentVisualTypeFilter = ""; currentTableFilter = ""; populateReportSelector(); populatePageSelector(); populateVisualTypeSelector(); populateTableSelector(); rebuildTree(); }
+function onReportFilter(val) { currentReportFilter = val; currentPageFilter = ""; populatePageSelector(); rebuildTree(); }
+function onPageFilter(val) { currentPageFilter = val; rebuildTree(); }
+function onVisualTypeFilter(val) { currentVisualTypeFilter = val; rebuildTree(); }
+function onTableFilter(val) { currentTableFilter = val; rebuildTree(); }
+function onTreeSearch(val) { currentSearchTerm = val.trim().toLowerCase(); applySearchHighlight(); }
 
-populateModelSelector();
-populateReportSelector();
-populatePageSelector();
+populateModelSelector(); populateReportSelector(); populatePageSelector(); populateVisualTypeSelector(); populateTableSelector();
 
 // ── TREE BUILDING ─────────────────────────────────────────────────
 function deepClone(node) {
   if (!node) return { name: "Empty", node_type: "model", metadata: {}, children: [] };
-  return { name: node.name, node_type: node.node_type, metadata: {...(node.metadata||{})},
-    children: (node.children||[]).map(deepClone) };
+  return { name: node.name, node_type: node.node_type, metadata: {...(node.metadata||{})}, children: (node.children||[]).map(deepClone) };
 }
 
 function buildCombinedTree() {
   const models = currentModelIndex === -1 ? MODELS : [MODELS[currentModelIndex]];
-
-  if (models.length === 1) {
-    let tree = deepClone(models[0].lineage_tree);
-    tree = filterTree(tree);
-    return tree;
-  }
-
-  // Multiple models — create a workspace root node
-  const root = {
-    name: "Workspace",
-    node_type: "workspace",
-    metadata: { model_count: models.length },
-    children: models.map(m => {
-      let tree = deepClone(m.lineage_tree);
-      tree = filterTree(tree);
-      return tree;
-    }).filter(t => t && ((t.children && t.children.length > 0) || !currentReportFilter))
+  if (models.length === 1) { let tree = deepClone(models[0].lineage_tree); tree = filterTree(tree); return tree; }
+  const root = { name: "Workspace", node_type: "workspace", metadata: { model_count: models.length },
+    children: models.map(m => { let tree = deepClone(m.lineage_tree); tree = filterTree(tree); return tree; }).filter(t => t && ((t.children && t.children.length > 0) || (!currentReportFilter && !currentTableFilter)))
   };
   return root;
 }
 
 function filterTree(node) {
   if (!node) return null;
-  if (!currentReportFilter && !currentPageFilter) return node;
+  const hasFilters = currentReportFilter || currentPageFilter || currentVisualTypeFilter || currentTableFilter;
+  if (!hasFilters) return node;
 
   if (node.node_type === "model" || node.node_type === "workspace") {
     node.children = (node.children || []).map(child => filterTree(child)).filter(c => c !== null);
     return node;
   }
   if (node.node_type === "table") {
+    if (currentTableFilter && node.name !== currentTableFilter) return null;
     node.children = (node.children || []).filter(child => {
       if (child.node_type !== "report") return true;
       if (currentReportFilter && child.metadata?.id !== currentReportFilter) return false;
-      if (currentPageFilter) {
+      if (currentPageFilter || currentVisualTypeFilter) {
         child.children = (child.children || []).filter(pg => {
-          const key = child.metadata?.id + "/" + pg.metadata?.name;
-          return key === currentPageFilter;
+          if (currentPageFilter) { const key = child.metadata?.id + "/" + pg.metadata?.name; if (key !== currentPageFilter) return false; }
+          if (currentVisualTypeFilter) {
+            pg.children = (pg.children || []).filter(v => v.node_type !== "visual" || v.name === currentVisualTypeFilter);
+            return pg.children.length > 0;
+          }
+          return true;
         });
         return child.children.length > 0;
       }
       return true;
     });
-    return node.children.length > 0 ? node : null;
+    return (node.children.length > 0 || !currentReportFilter) ? node : null;
   }
   return node;
 }
@@ -279,7 +289,7 @@ function filterTree(node) {
 let treeData;
 const container = document.getElementById("tree-panel");
 const W = Math.max(container.clientWidth || 1200, 800);
-const H = Math.max(window.innerHeight - 220, 500);
+const H = Math.max(window.innerHeight - 240, 500);
 
 const svg = d3.select("#tree-panel").append("svg").attr("width", W).attr("height", H);
 const g = svg.append("g");
@@ -290,10 +300,7 @@ const zoom = d3.zoom().scaleExtent([0.1, 4]).on("zoom", e => g.attr("transform",
 svg.call(zoom);
 svg.call(zoom.transform, d3.zoomIdentity.translate(140, 40).scale(0.85));
 
-function rebuildTree() {
-  treeData = buildCombinedTree();
-  renderTree();
-}
+function rebuildTree() { treeData = buildCombinedTree(); renderTree(); applySearchHighlight(); }
 
 function renderTree() {
   const root = d3.hierarchy(treeData, d => d.children);
@@ -302,20 +309,17 @@ function renderTree() {
   const dynH = Math.max(H - 80, leafCount * 26);
   d3.tree().size([dynH, W - 340]).separation((a,b) => a.parent === b.parent ? 1 : 1.3)(root);
 
-  // Links
   const linkData = root.links();
   linksG.selectAll("path.link").data(linkData, d => id(d.source) + "→" + id(d.target))
     .join(
-      enter => enter.append("path").attr("class","link").attr("d", linkGen).attr("stroke-opacity",0).transition().duration(400).attr("stroke-opacity",.5),
-      update => update.transition().duration(400).attr("d", linkGen),
-      exit => exit.transition().duration(200).attr("stroke-opacity",0).remove()
+      enter => enter.append("path").attr("class","link").attr("d", linkGen).attr("stroke-opacity",0).transition().duration(300).attr("stroke-opacity",.5),
+      update => update.transition().duration(300).attr("d", linkGen),
+      exit => exit.transition().duration(150).attr("stroke-opacity",0).remove()
     );
 
-  // Nodes
   const nodeData = root.descendants();
   const nodeG = nodesG.selectAll("g.node").data(nodeData, d => id(d));
-
-  nodeG.exit().transition().duration(200).style("opacity",0).remove();
+  nodeG.exit().transition().duration(150).style("opacity",0).remove();
 
   const enter = nodeG.enter().append("g").attr("class","node")
     .attr("transform", d => `translate(${d.y},${d.x})`).style("cursor","pointer").style("opacity",0);
@@ -327,35 +331,31 @@ function renderTree() {
     .attr("stroke-width", d => d.data._children ? 3 : 2)
     .attr("filter", "drop-shadow(0 1px 2px rgba(0,0,0,0.15))");
 
-  // +/- indicator
   enter.filter(d => (d.data.children && d.data.children.length) || d.data._children)
     .append("text").attr("class","toggle").attr("dy",".35em").attr("text-anchor","middle")
     .attr("fill","#fff").attr("font-size","10px").attr("font-weight","700")
     .text(d => d.data._children ? "+" : "\u2212");
 
-  // Label
   enter.append("text").attr("class","label").attr("dy",".35em")
     .attr("x", d => (d.children || d.data._children) ? -14 : 14)
     .attr("text-anchor", d => (d.children || d.data._children) ? "end" : "start")
     .attr("fill","#333").attr("font-size", currentFontSize + "px")
     .text(d => truncate(d.data.name, currentFontSize <= 10 ? 40 : 30));
 
-  // Visual subtitle
   enter.filter(d => d.data.node_type === "visual" && d.data.metadata?.title)
     .append("text").attr("dy","1.6em").attr("x",14).attr("text-anchor","start")
     .attr("fill","#888").attr("font-size", (currentFontSize-2)+"px").attr("font-style","italic")
     .text(d => truncate(String(d.data.metadata.title||""), 35));
 
-  // C/M badge
   enter.filter(d => d.data.node_type === "column" || d.data.node_type === "measure")
     .append("text").attr("dy",".35em").attr("x", d => 14 + d.data.name.length * 6.5 + 6)
     .attr("fill", d => NODE_COLORS[d.data.node_type]).attr("font-size","9px").attr("font-weight","600")
     .text(d => d.data.node_type === "measure" ? "M" : "C");
 
-  enter.transition().duration(400).style("opacity",1);
+  enter.transition().duration(300).style("opacity",1);
 
   const merged = enter.merge(nodeG);
-  merged.transition().duration(400).attr("transform", d => `translate(${d.y},${d.x})`).style("opacity",1);
+  merged.transition().duration(300).attr("transform", d => `translate(${d.y},${d.x})`).style("opacity",1);
   merged.select("circle").attr("stroke", d => d.data._children ? NODE_COLORS[d.data.node_type] : "#fff")
     .attr("stroke-width", d => d.data._children ? 3 : 2);
   merged.select(".toggle").text(d => d.data._children ? "+" : (d.data.children?.length ? "\u2212" : ""));
@@ -364,7 +364,19 @@ function renderTree() {
     const nd = d.data;
     if (nd._children) { nd.children = nd._children; nd._children = undefined; }
     else if (nd.children?.length) { nd._children = nd.children; nd.children = undefined; }
-    renderTree();
+    renderTree(); applySearchHighlight();
+  });
+}
+
+// ── SEARCH HIGHLIGHT ──────────────────────────────────────────────
+function applySearchHighlight() {
+  const allNodes = nodesG.selectAll("g.node");
+  if (!currentSearchTerm) { allNodes.classed("highlight", false).classed("dim", false); return; }
+  allNodes.each(function(d) {
+    const name = (d.data.name || "").toLowerCase();
+    const title = (d.data.metadata?.title || "").toLowerCase();
+    const match = name.includes(currentSearchTerm) || title.includes(currentSearchTerm);
+    d3.select(this).classed("highlight", match).classed("dim", !match);
   });
 }
 
@@ -372,16 +384,103 @@ function id(d) { const p = []; let c = d; while(c) { p.unshift(c.data.name); c =
 const linkGen = d3.linkHorizontal().x(d => d.y).y(d => d.x);
 function truncate(s, n) { return s.length > n ? s.slice(0, n-3) + "..." : s; }
 
-function expandAll() { expand(treeData); renderTree(); }
+function expandAll() { expand(treeData); renderTree(); applySearchHighlight(); }
 function collapseAll() { (treeData.children||[]).forEach(collapseNode); renderTree(); }
 function expand(n) { if(n._children){n.children=n._children;n._children=undefined;} (n.children||[]).forEach(expand); }
 function collapseNode(n) { (n.children||[]).forEach(collapseNode); if(n.children?.length){n._children=n.children;n.children=undefined;} }
-function resetView() { rebuildTree(); svg.call(zoom.transform, d3.zoomIdentity.translate(140,40).scale(0.85)); }
+function resetView() { currentSearchTerm=""; document.getElementById("treeSearch").value=""; rebuildTree(); svg.call(zoom.transform, d3.zoomIdentity.translate(140,40).scale(0.85)); }
 function changeFontSize(v) { currentFontSize = +v; nodesG.selectAll(".label").attr("font-size", v+"px"); }
 function toggleFullscreen() { document.body.classList.toggle("fullscreen"); }
 
-// Initial render
 rebuildTree();
+
+// ── RELATIONSHIP GRAPH TAB ────────────────────────────────────────
+let relGraphBuilt = false;
+function buildRelGraph() {
+  if (relGraphBuilt) return;
+  relGraphBuilt = true;
+  const panel = document.getElementById("rel-panel");
+
+  // Model selector for relationships
+  let html = `<div style="margin-bottom:12px;display:flex;gap:10px;align-items:center">
+    <label style="font-weight:600;font-size:13px">Model:</label>
+    <select id="relModelSel" onchange="renderRelGraph(+this.value)" style="padding:4px 8px;border:1px solid #d0d0d0;border-radius:4px;font-size:13px">`;
+  MODELS.forEach((m, i) => { html += `<option value="${i}">${esc(m.model.name)} (${m.model.relationships.length} rels)</option>`; });
+  html += `</select><span id="relStats" style="font-size:12px;color:#666"></span></div>`;
+  html += `<svg id="rel-svg"></svg>`;
+  panel.innerHTML = html;
+  renderRelGraph(0);
+}
+
+function renderRelGraph(modelIdx) {
+  const m = MODELS[modelIdx].model;
+  const rels = m.relationships;
+  const tables = m.tables.filter(t => !t.is_hidden);
+
+  document.getElementById("relStats").textContent = `${tables.length} tables, ${rels.length} relationships`;
+
+  // Build nodes and links
+  const tableNames = new Set(tables.map(t => t.name));
+  rels.forEach(r => { tableNames.add(r.from_table); tableNames.add(r.to_table); });
+  const nodes = [...tableNames].map(name => {
+    const tbl = tables.find(t => t.name === name);
+    return { id: name, columns: tbl ? tbl.columns.length : 0, measures: tbl ? tbl.measures.length : 0 };
+  });
+  const links = rels.map(r => ({
+    source: r.from_table, target: r.to_table,
+    fromCol: r.from_column, toCol: r.to_column,
+    cardinality: `${r.from_cardinality}:${r.to_cardinality}`,
+    isActive: r.is_active
+  }));
+
+  const svgEl = document.getElementById("rel-svg");
+  const width = svgEl.clientWidth || 900;
+  const height = svgEl.clientHeight || 500;
+
+  d3.select("#rel-svg").selectAll("*").remove();
+  const rSvg = d3.select("#rel-svg").attr("viewBox", [0, 0, width, height]);
+
+  // Arrow marker
+  rSvg.append("defs").append("marker").attr("id","arrowhead").attr("viewBox","0 -5 10 10")
+    .attr("refX",25).attr("refY",0).attr("markerWidth",6).attr("markerHeight",6).attr("orient","auto")
+    .append("path").attr("d","M0,-5L10,0L0,5").attr("fill","#999");
+
+  const simulation = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(links).id(d => d.id).distance(150))
+    .force("charge", d3.forceManyBody().strength(-400))
+    .force("center", d3.forceCenter(width/2, height/2))
+    .force("collision", d3.forceCollide(50));
+
+  const link = rSvg.append("g").selectAll("line").data(links).join("line")
+    .attr("class", d => "rel-link" + (d.isActive ? "" : " inactive"))
+    .attr("stroke-width", 2);
+
+  const linkLabel = rSvg.append("g").selectAll("text").data(links).join("text")
+    .attr("class","rel-label").attr("text-anchor","middle")
+    .text(d => `${d.fromCol} → ${d.toCol} [${d.cardinality}]`);
+
+  const node = rSvg.append("g").selectAll("g").data(nodes).join("g").attr("class","rel-node")
+    .call(d3.drag().on("start", dragStart).on("drag", dragging).on("end", dragEnd));
+
+  node.append("rect").attr("width",100).attr("height",36).attr("x",-50).attr("y",-18)
+    .attr("rx",6).attr("fill","#00b7c3").attr("stroke","#008a94").attr("stroke-width",1.5)
+    .attr("filter","drop-shadow(0 2px 4px rgba(0,0,0,0.15))");
+
+  node.append("text").attr("dy","-2").attr("text-anchor","middle").attr("fill","#fff")
+    .text(d => truncate(d.id, 14));
+  node.append("text").attr("dy","12").attr("text-anchor","middle").attr("fill","#e0f7fa").attr("font-size","9px")
+    .text(d => `${d.columns}C ${d.measures}M`);
+
+  simulation.on("tick", () => {
+    link.attr("x1",d=>d.source.x).attr("y1",d=>d.source.y).attr("x2",d=>d.target.x).attr("y2",d=>d.target.y);
+    linkLabel.attr("x",d=>(d.source.x+d.target.x)/2).attr("y",d=>(d.source.y+d.target.y)/2 - 8);
+    node.attr("transform",d=>`translate(${d.x},${d.y})`);
+  });
+
+  function dragStart(event,d) { if(!event.active) simulation.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; }
+  function dragging(event,d) { d.fx=event.x; d.fy=event.y; }
+  function dragEnd(event,d) { if(!event.active) simulation.alphaTarget(0); d.fx=null; d.fy=null; }
+}
 
 // ── IMPACT ANALYSIS TAB ───────────────────────────────────────────
 (function buildImpact() {
@@ -400,11 +499,26 @@ rebuildTree();
     });
   });
 
+  // Detect orphaned columns/measures (not used in any visual)
+  const usedFields = new Set(rows.map(r => r.model + "|" + r.table + "|" + r.field + "|" + r.type));
+  const orphanFields = [];
+  MODELS.forEach(mData => {
+    mData.model.tables.filter(t => !t.is_hidden).forEach(tbl => {
+      tbl.columns.filter(c => !c.is_hidden).forEach(c => {
+        const key = mData.model.name + "|" + tbl.name + "|" + c.name + "|column";
+        if (!usedFields.has(key)) orphanFields.push({ model: mData.model.name, table: tbl.name, field: c.name, type: "column" });
+      });
+      tbl.measures.forEach(ms => {
+        const key = mData.model.name + "|" + tbl.name + "|" + ms.name + "|measure";
+        if (!usedFields.has(key)) orphanFields.push({ model: mData.model.name, table: tbl.name, field: ms.name, type: "measure" });
+      });
+    });
+  });
+
   const uniqModels = new Set(rows.map(r=>r.model)).size || MODELS.length;
   const uniqCols = new Set(rows.filter(r=>r.type==="column").map(r=>r.model+"."+r.table+"."+r.field)).size;
   const uniqMeas = new Set(rows.filter(r=>r.type==="measure").map(r=>r.model+"."+r.table+"."+r.field)).size;
   const uniqReports = new Set(rows.map(r=>r.report)).size;
-  const uniqVisuals = rows.length;
 
   const panel = document.getElementById("impact-panel");
   panel.innerHTML = `
@@ -413,11 +527,12 @@ rebuildTree();
       <div class="stat-card"><div class="stat-val">${uniqCols}</div><div class="stat-label">Columns Used</div></div>
       <div class="stat-card"><div class="stat-val">${uniqMeas}</div><div class="stat-label">Measures Used</div></div>
       <div class="stat-card"><div class="stat-val">${uniqReports}</div><div class="stat-label">Reports</div></div>
-      <div class="stat-card"><div class="stat-val">${uniqVisuals}</div><div class="stat-label">Field Bindings</div></div>
+      <div class="stat-card"><div class="stat-val">${rows.length}</div><div class="stat-label">Field Bindings</div></div>
+      <div class="stat-card"><div class="stat-val" style="color:#e65100">${orphanFields.length}</div><div class="stat-label">Unused Fields</div></div>
     </div>
     <div style="display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap;align-items:center">
       <input class="search-box" placeholder="Search fields, reports, visuals..." oninput="filterImpact(this.value)">
-      <select id="impactModelFilter" onchange="filterImpact(document.querySelector('.search-box').value)" style="padding:6px 8px;border:1px solid #d0d0d0;border-radius:4px;font-size:13px">
+      <select id="impactModelFilter" onchange="filterImpact(document.querySelector('#impact-panel .search-box').value)" style="padding:6px 8px;border:1px solid #d0d0d0;border-radius:4px;font-size:13px">
         <option value="">All Models</option>
         ${MODELS.map(m => `<option value="${esc(m.model.name)}">${esc(m.model.name)}</option>`).join("")}
       </select>
@@ -426,15 +541,22 @@ rebuildTree();
       <thead><tr><th>Model</th><th>Table</th><th>Field</th><th>Type</th><th>Report</th><th>Page</th><th>Visual</th><th>Visual Type</th></tr></thead>
       <tbody>${rows.map(r => `<tr data-model="${esc(r.model)}">
         <td><span class="badge badge-model">${esc(r.model)}</span></td>
-        <td>${esc(r.table)}</td>
-        <td>${esc(r.field)}</td>
+        <td>${esc(r.table)}</td><td>${esc(r.field)}</td>
         <td><span class="badge ${r.type==='measure'?'badge-meas':'badge-col'}">${r.type}</span></td>
-        <td>${esc(r.report)}</td>
-        <td>${esc(r.page)}</td>
-        <td>${esc(r.visual)}</td>
-        <td>${esc(r.vtype)}</td>
+        <td>${esc(r.report)}</td><td>${esc(r.page)}</td><td>${esc(r.visual)}</td><td>${esc(r.vtype)}</td>
       </tr>`).join("")}</tbody>
-    </table>`;
+    </table>
+    ${orphanFields.length > 0 ? `<div class="orphan-section">
+      <h3>&#x26A0;&#xFE0F; Unused Fields (${orphanFields.length}) — not bound to any visual</h3>
+      <p style="font-size:12px;color:#666;margin-bottom:8px">These columns/measures exist in the model but are NOT used in any report visual. Consider removing or documenting them.</p>
+      <table class="data-grid"><thead><tr><th>Model</th><th>Table</th><th>Field</th><th>Type</th></tr></thead>
+      <tbody>${orphanFields.slice(0, 100).map(o => `<tr>
+        <td><span class="badge badge-model">${esc(o.model)}</span></td>
+        <td>${esc(o.table)}</td><td>${esc(o.field)}</td>
+        <td><span class="badge ${o.type==='measure'?'badge-meas':'badge-col'}">${o.type}</span></td>
+      </tr>`).join("")}</tbody></table>
+      ${orphanFields.length > 100 ? `<p style="margin-top:6px;font-size:11px;color:#999">Showing first 100 of ${orphanFields.length}</p>` : ""}
+    </div>` : ""}`;
 })();
 
 function filterImpact(q) {
@@ -478,24 +600,18 @@ function esc(s) { const d = document.createElement("div"); d.textContent = s||""
         ${reports.length === 0 ? '<span style="color:#e65100;font-size:11px"> &#x26A0;&#xFE0F; Orphaned</span>' : ''}
       </summary>`;
 
-    if (reports.length > 0) {
-      html += `<div style="margin:8px 0"><strong>Reports:</strong> ${reports.map(r => esc(r.name)).join(", ")}</div>`;
-    }
+    if (reports.length > 0) html += `<div style="margin:8px 0"><strong>Reports:</strong> ${reports.map(r => esc(r.name)).join(", ")}</div>`;
 
     visTables.forEach(tbl => {
       html += `<details style="margin:4px 0 4px 16px"><summary style="cursor:pointer;font-weight:500;padding:4px 0">&#x1F4CB; ${esc(tbl.name)} &mdash; ${tbl.columns.length} cols, ${tbl.measures.length} measures</summary>`;
       if (tbl.columns.length) {
         html += `<table class="data-grid" style="margin:8px 0 8px 16px"><thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead><tbody>`;
-        tbl.columns.filter(c=>!c.is_hidden).forEach(c => {
-          html += `<tr><td>${esc(c.name)}</td><td>${esc(c.data_type)}</td><td>${esc(c.description||"")}</td></tr>`;
-        });
+        tbl.columns.filter(c=>!c.is_hidden).forEach(c => { html += `<tr><td>${esc(c.name)}</td><td>${esc(c.data_type)}</td><td>${esc(c.description||"")}</td></tr>`; });
         html += `</tbody></table>`;
       }
       if (tbl.measures.length) {
         html += `<table class="data-grid" style="margin:8px 0 8px 16px"><thead><tr><th>Measure</th><th>Expression</th></tr></thead><tbody>`;
-        tbl.measures.forEach(ms => {
-          html += `<tr><td>${esc(ms.name)}</td><td><code style="font-size:12px">${esc(ms.expression)}</code></td></tr>`;
-        });
+        tbl.measures.forEach(ms => { html += `<tr><td>${esc(ms.name)}</td><td><code style="font-size:12px">${esc(ms.expression)}</code></td></tr>`; });
         html += `</tbody></table>`;
       }
       html += `</details>`;
@@ -504,15 +620,11 @@ function esc(s) { const d = document.createElement("div"); d.textContent = s||""
     if (m.relationships.length) {
       html += `<details style="margin:8px 0 8px 16px"><summary style="cursor:pointer;font-weight:500;padding:4px 0">&#x1F517; Relationships (${m.relationships.length})</summary>
         <table class="data-grid" style="margin:8px 0"><thead><tr><th>From</th><th>&rarr;</th><th>To</th><th>Cardinality</th><th>Active</th></tr></thead><tbody>`;
-      m.relationships.forEach(r => {
-        html += `<tr><td>${esc(r.from_table)}.${esc(r.from_column)}</td><td>&rarr;</td><td>${esc(r.to_table)}.${esc(r.to_column)}</td><td>${r.from_cardinality}:${r.to_cardinality}</td><td>${r.is_active?"&#x2705;":"&#x274C;"}</td></tr>`;
-      });
+      m.relationships.forEach(r => { html += `<tr><td>${esc(r.from_table)}.${esc(r.from_column)}</td><td>&rarr;</td><td>${esc(r.to_table)}.${esc(r.to_column)}</td><td>${r.from_cardinality}:${r.to_cardinality}</td><td>${r.is_active?"&#x2705;":"&#x274C;"}</td></tr>`; });
       html += `</tbody></table></details>`;
     }
-
     html += `</details>`;
   });
-
   panel.innerHTML = html;
 })();
 </script>
