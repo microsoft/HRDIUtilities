@@ -1,7 +1,7 @@
 """
 TOMPo MCP Server — Power BI & Fabric Lineage Intelligence.
 
-Exposes 6 tools to AI assistants (GitHub Copilot, Claude, etc.):
+Exposes 6 tools to AI assistants (GitHub Copilot, Claude, etc):
   1. list_workspaces            — List Fabric workspaces you have access to
   2. generate_lineage           — Full lineage for ONE model: model → tables → reports → visuals → fields
   3. generate_workspace_lineage — Full lineage for ALL models in a workspace (parallel, fast)
