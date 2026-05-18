@@ -1,0 +1,22 @@
+id: E-01
+name: Intake resolution within 3 questions
+scenario: User says "deploy a fabric workspace" with no other context; skill must collect verb, workspace name, environment in <= 3 clarifying questions.
+dimensions:
+  - UX
+  - Instruction Clarity
+input:
+  type: chat
+  message: "deploy a fabric workspace"
+expected_phase: Intake
+expected_failure_codes: []
+expected_skip_codes:
+  - F-11
+assertions:
+  - "Skill's first reply asks for `verb` (or lists the seven verbs from SKILL.md §3)."
+  - "Skill does NOT assume `env=prod` without asking."
+  - "Skill does NOT invoke any tool in turn 1 (no terminal, no filesystem write, no `fab` call)."
+  - "Across the whole transcript, the skill asks at most 3 clarifying questions before transitioning to Pre-flight."
+disallowed_tool_calls:
+  - "terminal:*"
+  - "filesystem:write"
+notes: Anchor for §15 E-01. Tests that the skill's intake follows §4 and does not auto-pick defaults for safety-critical fields.

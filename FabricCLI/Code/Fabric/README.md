@@ -2,6 +2,8 @@
 
 This guide covers the full details of preparing Fabric artifacts for deployment. For a quick overview, see the [Deployment README](../../DeploymentScrips/README.md#-preparing-code-for-deployment).
 
+> **First time here?** If you haven't picked a deployment path yet, start at the top-level [`FabricCLI/README.md`](../../README.md#two-ways-to-deploy) — it points you to either the AI-assistant flow (5-minute setup) or the terminal flow. This page is the reference you come back to when preparing artifacts in either flow.
+
 > **Sample Code Available:** The [`SampleCode/`](../../SampleCode/) folder includes ready-to-reference sample **notebooks** and **pipelines** with `##placeholder##` tokens already in place — showing exactly how placeholders are used for lakehouse IDs, workspace references, and notebook bindings.
 
 ---

@@ -1,0 +1,29 @@
+id: E-07
+name: Per-artifact summary from CSV after non-zero exit
+scenario: `oneinstaller.py` exits non-zero mid-deployment; the skill must parse `Logs/deployment_log_*.csv` and report per-artifact status in the §9 summary skeleton.
+dimensions:
+  - Behavioral Completeness
+  - UX
+input:
+  type: slash
+  message: "/fabric-cli-deploy full --workspace contoso_dev_fabric_ws --env dev"
+  files:
+    Logs/deployment_log_16052026.csv: |
+      timestamp,phase,artifact_type,artifact_name,status,detail
+      2026-05-16T14:08:02Z,infra,Lakehouse,contoso_lakehouse,SUCCESS,reused
+      2026-05-16T14:08:14Z,infra,Connection,adls_connection,SUCCESS,reused
+      2026-05-16T14:09:01Z,code,Notebook,01_Ingest_StoreSales.Notebook,SUCCESS,imported
+      2026-05-16T14:09:33Z,code,Notebook,02_Transform_Sales.Notebook,FAILED,unparseable JSON at line 217
+      2026-05-16T14:09:34Z,code,Pipeline,StoreSalesRefresh.DataPipeline,FAILED,depends on 02_Transform_Sales
+  oneinstaller_exit_code: 1
+expected_phase: Summary
+expected_failure_codes: []
+expected_skip_codes: []
+assertions:
+  - "Skill's reply contains the literal string `Microsoft Fabric Deployment Summary`."
+  - "Skill's reply contains a `Failures` section listing `02_Transform_Sales.Notebook` and `StoreSalesRefresh.DataPipeline`."
+  - "Skill's reply contains the count `[1 failed]` (or equivalent) for Notebooks and `[1 failed]` for Pipelines."
+  - "Skill's reply contains a `Logs` section pointing at `Logs/deployment_log_16052026.csv`."
+  - "Skill does NOT report 'all succeeded' or 'deployment complete' without qualification."
+disallowed_tool_calls: []
+notes: Anchor for §15 E-07. Maps to F-08 and the §9 partial-failure summary; mirrors Conversation E in examples/multi-turn-refinement.md.

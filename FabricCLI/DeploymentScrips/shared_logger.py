@@ -19,6 +19,12 @@ import csv
 from pathlib import Path
 from datetime import datetime
 
+try:
+    from security_utils import redact_secrets
+except ImportError:  # pragma: no cover - script may be run from elsewhere
+    def redact_secrets(text):
+        return text
+
 
 class SharedLogger:
     """Shared logging with console output, running log, and CSV audit trail."""
@@ -96,6 +102,8 @@ class SharedLogger:
         elif level == "ERROR":
             self.error_count += 1
 
+        message = redact_secrets(message)
+
         colors = {
             "INFO": "\033[37m",
             "SUCCESS": "\033[32m",
@@ -137,14 +145,14 @@ class SharedLogger:
                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "Fabric",
                     self.script_name,
-                    resource_name,
+                    redact_secrets(resource_name),
                     resource_type,
                     status,
                     success,
-                    error_reason,
-                    execution_command,
+                    redact_secrets(error_reason),
+                    redact_secrets(execution_command),
                     action,
-                    remediation_steps,
+                    redact_secrets(remediation_steps),
                 ])
         except Exception:
             pass

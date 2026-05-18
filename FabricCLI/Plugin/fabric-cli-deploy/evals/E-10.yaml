@@ -1,0 +1,28 @@
+id: E-10
+name: Final summary matches §9 verbatim skeleton
+scenario: A successful `full` deployment completes; the skill's final summary must match the §9 skeleton byte-for-byte modulo dynamic values (workspace name, timestamps, counts).
+dimensions:
+  - UX
+  - Example Quality
+input:
+  type: slash
+  message: "/fabric-cli-deploy full --workspace contoso_dev_fabric_ws --env dev"
+  files:
+    Logs/deployment_log_16052026.csv: |
+      timestamp,phase,artifact_type,artifact_name,status,detail
+      2026-05-16T14:08:02Z,infra,Lakehouse,contoso_lakehouse,SUCCESS,created
+      2026-05-16T14:09:01Z,code,Notebook,01_Ingest.Notebook,SUCCESS,imported
+  oneinstaller_exit_code: 0
+expected_phase: Summary
+expected_failure_codes: []
+expected_skip_codes: []
+assertions:
+  - "Skill's reply contains the header line `Microsoft Fabric Deployment Summary` (with optional ` (PARTIAL — see Failures)` qualifier)."
+  - "Skill's reply contains a `Workspace :` line followed by the workspace name."
+  - "Skill's reply contains both an `Infrastructure` block and a `Code Artifacts` block, in that order."
+  - "Skill's reply contains a `Warnings` section header (even if empty)."
+  - "Skill's reply contains a `Logs` section listing both `runninglog_*.txt` and `deployment_log_*.csv`."
+  - "Skill's reply contains a `Next steps` section."
+  - "Section order matches §9: header → Workspace metadata → Infrastructure → Code Artifacts → Warnings → Failures → Logs → Next steps."
+disallowed_tool_calls: []
+notes: Anchor for §15 E-10. Tests SKILL.md §9 (summary contract). Harness checks structural markers, not LLM prose between them.
