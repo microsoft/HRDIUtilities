@@ -37,14 +37,15 @@ graph LR
 
 ### Two ways to deploy
 
-Pick whichever fits your workflow — both use the same engine and config:
+Pick whichever fits your workflow — all paths use the same engine and config:
 
 | Path | Best for | Start here |
 |---|---|---|
-| 💬 **AI assistant (recommended for first-timers)** | You want to be guided by an agent that validates, redacts secrets, confirms prod, and parses logs for you. | [`Plugin/fabric-cli-deploy/README.md`](Plugin/fabric-cli-deploy/README.md) — **5-minute setup**. |
+| 💬 **VS Code Copilot Chat (zero install)** | You already have GitHub Copilot Chat in VS Code and want to invoke the deploy workflow inside this clone. | Open the repo in VS Code and run `/fabric-cli-deploy` in Copilot Chat. The prompt is checked in at [`.github/prompts/fabric-cli-deploy.prompt.md`](.github/prompts/fabric-cli-deploy.prompt.md). |
+| 🤖 **Agency / Claude plugin** | You use the Agency CLI or Claude and want the full marketplace plugin with eval harness. | Install via `/plugin install fabric-cli-deploy@playground`. Source at [agency-microsoft/playground](https://github.com/agency-microsoft/playground/tree/main/plugins/fabric-cli-deploy). |
 | ⌨️ **Terminal / scripts** | You want full manual control, CI/CD pipelines, or step-by-step execution. | Continue reading this README. |
 
-> Both paths read the same `Config/fabric_config.json` and the same `Code/Fabric/**` tree. You can switch between them at any time.
+> All paths read the same `Config/fabric_config.json` and the same `Code/Fabric/**` tree. You can switch between them at any time.
 
 ### Key Features
 
