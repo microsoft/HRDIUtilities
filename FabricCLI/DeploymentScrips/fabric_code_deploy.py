@@ -32,6 +32,12 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union
 from shared_logger import SharedLogger
+from security_utils import (
+    ValidationError,
+    assert_within_repo,
+    run_argv,
+    validate_value,
+)
 
 
 class FabricCodeDeployment:
@@ -39,11 +45,16 @@ class FabricCodeDeployment:
 
     def __init__(self, workspace_root: str, config_path: str = None,
                  minimal_logging: bool = False, verbose_logging: bool = False):
-        self.workspace_root = Path(workspace_root)
-        self.config_path = (
+        self.workspace_root = Path(workspace_root).resolve()
+        cfg_candidate = (
             Path(config_path) if config_path
             else self.workspace_root / "Config" / "fabric_config.json"
         )
+        try:
+            self.config_path = assert_within_repo(cfg_candidate, self.workspace_root)
+        except ValidationError as exc:
+            raise ValidationError(f"--config rejected: {exc}") from exc
+
         self.source_path = self.workspace_root / "Code" / "Fabric"
         self.temp_path = self.workspace_root / "temp"
 
@@ -79,22 +90,18 @@ class FabricCodeDeployment:
                 name = name[len(p):]
         return name.rstrip("/").replace(".Workspace", "")
 
-    def _run(self, cmd: str, capture: bool = False) -> Union[bool, Tuple[bool, str]]:
-        """Run a shell command. Returns bool or (bool, stdout) when capture=True."""
+    def _run(self, argv: List[str], capture: bool = False) -> Union[bool, Tuple[bool, str]]:
+        """Run a command as an argv list (shell=False).
+
+        Returns bool, or (bool, stdout) when capture=True.
+        """
         if self.verbose_logging:
-            self.logger.write_log(f"[DEBUG] {cmd}", "DEBUG")
+            self.logger.write_log(f"[DEBUG] argv={argv}", "DEBUG")
         timeout = 60 if capture else 300
-        try:
-            r = subprocess.run(cmd, shell=True, capture_output=capture,
-                               text=True if capture else False,
-                               timeout=timeout, cwd=None)
-            if capture:
-                return r.returncode == 0, (r.stdout.strip() if r.stdout else "")
-            return r.returncode == 0
-        except subprocess.TimeoutExpired:
-            return (False, "") if capture else False
-        except Exception:
-            return (False, "") if capture else False
+        ok, out, _ = run_argv(argv, capture=capture, timeout=timeout)
+        if capture:
+            return ok, out
+        return ok
 
     # ------------------------------------------------------------------
     # Config loading
@@ -112,7 +119,12 @@ class FabricCodeDeployment:
             if not ws:
                 self.logger.write_log("fabricWorkspaceName missing in config.", "ERROR")
                 return False
-            self.target_workspace = self._clean_ws(ws)
+            ws_clean = self._clean_ws(ws)
+            try:
+                self.target_workspace = validate_value(ws_clean, "workspaceName")
+            except ValidationError as exc:
+                self.logger.write_log(f"Invalid fabricWorkspaceName: {exc}", "ERROR")
+                return False
 
             # Build replacement map from all simple parameters
             for key, param in self.config_data.get("parameters", {}).items():
@@ -183,15 +195,21 @@ class FabricCodeDeployment:
             self.logger.write_log(f"  [SKIP] Not found: {local_path}", "WARNING")
             return False
 
+        # Containment: never let target_path reach `fab import` if it
+        # contains shell metacharacters or NUL.
+        if any(ch in target_path for ch in ";&|<>$`\\\"'\n\r\t\x00"):
+            self.logger.write_log(f"  [ERROR] Refusing unsafe target path: {target_path!r}", "ERROR")
+            return False
+
         parts = target_path.split("/")
         if parts and not parts[0].endswith(".Workspace"):
             parts[0] += ".Workspace"
         target_path = "/".join(parts)
 
-        cmd = f'fab import "{target_path}" -f -i "{local_path}"'
-        self.logger.write_log(f"  [ACTION] {cmd}", "INFO")
+        argv = ["fab", "import", target_path, "-f", "-i", local_path]
+        self.logger.write_log(f"  [ACTION] argv={argv}", "INFO")
 
-        ok = self._run(cmd)
+        ok = self._run(argv)
 
         artifact = os.path.basename(local_path)
         if ok:
@@ -235,7 +253,7 @@ class FabricCodeDeployment:
                 # Capture deployed model ID for report binding
                 clean = folder.name.replace(".SemanticModel", "")
                 ok_id, mid = self._run(
-                    f'fab get "{self.target_workspace}.Workspace/{clean}.SemanticModel" -q id',
+                    ["fab", "get", f"{self.target_workspace}.Workspace/{clean}.SemanticModel", "-q", "id"],
                     capture=True,
                 )
                 if ok_id and mid:
@@ -319,7 +337,7 @@ class FabricCodeDeployment:
                 # Capture notebook ID for pipeline binding
                 clean = folder.name.replace(".Notebook", "")
                 ok_id, nid = self._run(
-                    f'fab get "{self.target_workspace}.Workspace/{clean}.Notebook" -q id',
+                    ["fab", "get", f"{self.target_workspace}.Workspace/{clean}.Notebook", "-q", "id"],
                     capture=True,
                 )
                 if ok_id and nid:
@@ -468,7 +486,11 @@ def main():
     )
 
     if args.source:
-        deployer.source_path = Path(args.source)
+        try:
+            deployer.source_path = assert_within_repo(args.source, deployer.workspace_root)
+        except ValidationError as exc:
+            print(f"[ERROR] --source rejected: {exc}")
+            sys.exit(2)
 
     ok = deployer.deploy_all()
     sys.exit(0 if ok else 1)

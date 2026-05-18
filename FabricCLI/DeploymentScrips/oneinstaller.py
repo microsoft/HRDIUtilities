@@ -27,6 +27,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+from security_utils import (
+    ValidationError,
+    assert_within_repo,
+    redact_secrets,
+    validate_value,
+)
+
 
 class FabricDeploymentOrchestrator:
     """Chains Fabric deployment scripts in dependency order."""
@@ -59,28 +66,53 @@ class FabricDeploymentOrchestrator:
             print("        See README.md for full setup instructions.\n")
             return False
 
-        # 2. Load workspace name from config
+        # 2b. Confirm dependent deployment scripts exist and live under the
+        # repo root (defends against supply-chain swap / missing files).
+        for script_name in ("fabric_infra_deploy.py", "fabric_code_deploy.py"):
+            script_path = self.script_dir / script_name
+            try:
+                assert_within_repo(script_path, self.workspace_root)
+            except ValidationError as exc:
+                print(f"\n[ERROR] Deployment script path rejected: {exc}\n")
+                return False
+            if not script_path.exists():
+                print(f"\n[ERROR] Required deployment script missing: {script_path}\n")
+                return False
+
+        # 2c. Confirm config_path is inside the repo before reading it.
+        try:
+            self.config_path = assert_within_repo(self.config_path, self.workspace_root)
+        except ValidationError as exc:
+            print(f"\n[ERROR] Config path rejected: {exc}\n")
+            return False
+
+        # 3. Load workspace name from config
         if not self.config_path.exists():
             print(f"\n[ERROR] Config file not found: {self.config_path}")
             return False
 
-        with open(self.config_path, "r") as f:
+        with open(self.config_path, "r", encoding="utf-8") as f:
             cfg = json.load(f)
 
         params = cfg.get("parameters", cfg)
-        workspace = params.get("fabricWorkspaceName", {}).get("value", "").strip()
-        if not workspace:
+        workspace_raw = params.get("fabricWorkspaceName", {}).get("value", "").strip()
+        if not workspace_raw:
             print("\n[ERROR] 'fabricWorkspaceName' is not set in fabric_config.json.")
             return False
+        try:
+            workspace = validate_value(workspace_raw, "workspaceName")
+        except ValidationError as exc:
+            print(f"\n[ERROR] fabricWorkspaceName failed validation: {exc}\n")
+            return False
 
-        # 3. Show confirmation and get user consent
+        # 4. Show confirmation and get user consent
         mode = "Full (Infrastructure + Code)"
         if self.skip_infra:
             mode = "Code Artifacts Only (--skip-infra)"
         elif self.skip_code:
             mode = "Infrastructure Only (--skip-code)"
 
-        print(f"\n  Target Workspace : {workspace}")
+        print(f"\n  Target Workspace : {redact_secrets(workspace)}")
         print(f"  Deployment Mode  : {mode}")
         print()
         answer = input("  Proceed with deployment? (Y/N): ").strip().upper()
@@ -92,6 +124,11 @@ class FabricDeploymentOrchestrator:
 
     def run_script(self, name: str) -> bool:
         path = self.script_dir / name
+        try:
+            path = assert_within_repo(path, self.workspace_root)
+        except ValidationError as exc:
+            print(f"[ERROR] Script path rejected: {exc}")
+            return False
         if not path.exists():
             print(f"[ERROR] Script not found: {path}")
             return False
@@ -106,7 +143,7 @@ class FabricDeploymentOrchestrator:
         print(f"  Running: {name}")
         print(f"{'='*60}")
         try:
-            result = subprocess.run(cmd, cwd=self.script_dir)
+            result = subprocess.run(cmd, cwd=self.script_dir, shell=False)
             return result.returncode == 0
         except Exception as exc:
             print(f"[ERROR] {name}: {exc}")

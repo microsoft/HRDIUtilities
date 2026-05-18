@@ -35,6 +35,17 @@ graph LR
     style E fill:#ffe1e1,color:#000
 ```
 
+### Two ways to deploy
+
+Pick whichever fits your workflow — both use the same engine and config:
+
+| Path | Best for | Start here |
+|---|---|---|
+| 💬 **AI assistant (recommended for first-timers)** | You want to be guided by an agent that validates, redacts secrets, confirms prod, and parses logs for you. | [`Plugin/fabric-cli-deploy/README.md`](Plugin/fabric-cli-deploy/README.md) — **5-minute setup**. |
+| ⌨️ **Terminal / scripts** | You want full manual control, CI/CD pipelines, or step-by-step execution. | Continue reading this README. |
+
+> Both paths read the same `Config/fabric_config.json` and the same `Code/Fabric/**` tree. You can switch between them at any time.
+
 ### Key Features
 
 | Feature | Description |

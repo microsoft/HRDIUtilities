@@ -20,12 +20,21 @@ Usage:
 """
 
 import os
+import re
 import json
 import subprocess
 import argparse
 from pathlib import Path
-from typing import Tuple
+from typing import List, Tuple
 from shared_logger import SharedLogger
+from security_utils import (
+    ValidationError,
+    assert_within_repo,
+    redact_secrets,
+    run_argv,
+    validate_int_range,
+    validate_value,
+)
 
 
 class FabricInfraDeployment:
@@ -36,15 +45,23 @@ class FabricInfraDeployment:
         self.verbose_logging = verbose_logging
         self.minimal_logging = minimal_logging
 
-        # Resolve paths relative to repo root (FabricCLI/)
+        # Resolve paths relative to repo root (FabricCLI/) and require the
+        # caller-supplied config_path to live under the repo root.
         script_dir = Path(__file__).parent
-        self.workspace_root = script_dir.parent
-        self.config_path = Path(config_path) if config_path else self.workspace_root / "Config" / "fabric_config.json"
+        self.workspace_root = script_dir.parent.resolve()
+        default_config = self.workspace_root / "Config" / "fabric_config.json"
+        try:
+            self.config_path = assert_within_repo(
+                Path(config_path) if config_path else default_config,
+                self.workspace_root,
+            )
+        except ValidationError as exc:
+            raise ValidationError(f"--config rejected: {exc}") from exc
 
-        # Load workspace name
-        self.target_workspace = self._clean_workspace_name(
-            self._get_config_value("fabricWorkspaceName")
-        )
+        # Load and validate workspace name
+        ws_raw = self._get_config_value("fabricWorkspaceName")
+        ws_clean = self._clean_workspace_name(ws_raw)
+        self.target_workspace = validate_value(ws_clean, "workspaceName")
 
         # Logger
         self.logger = SharedLogger("fabric_infra_deploy.py", str(self.workspace_root), minimal_logging)
@@ -93,24 +110,18 @@ class FabricInfraDeployment:
         with open(self.config_path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
 
-    def _run(self, cmd: str, capture: bool = False) -> Tuple[bool, str, str]:
-        """Execute a shell command and return (success, stdout, stderr)."""
-        self.logger.write_log(f"[DEBUG] {cmd}", "DEBUG")
+    def _run(self, argv: List[str], capture: bool = False) -> Tuple[bool, str, str]:
+        """Execute a command as an argv list (shell=False).
+
+        Returns (success, stdout, stderr). The argv list is logged with
+        secrets redacted; no shell interpolation ever occurs.
+        """
+        self.logger.write_log(f"[DEBUG] argv={redact_secrets(str(argv))}", "DEBUG")
         actual_capture = capture or self.minimal_logging
-        try:
-            r = subprocess.run(cmd, shell=True, capture_output=actual_capture,
-                               text=True if actual_capture else None,
-                               timeout=300, cwd=None)
-            out = r.stdout.strip() if actual_capture and r.stdout else ""
-            err = r.stderr.strip() if actual_capture and r.stderr else ""
-            return r.returncode == 0, out, err
-        except subprocess.TimeoutExpired:
-            return False, "", "Command timed out"
-        except Exception as exc:
-            return False, "", str(exc)
+        return run_argv(argv, capture=actual_capture, timeout=300)
 
     def _exists(self, path: str) -> bool:
-        ok, out, _ = self._run(f'fab exists "{path}"', capture=True)
+        ok, out, _ = self._run(["fab", "exists", path], capture=True)
         return ok and "true" in out.lower()
 
     # ------------------------------------------------------------------
@@ -126,7 +137,7 @@ class FabricInfraDeployment:
         # --- Workspace ID ---
         ws_id = self._get_config_value("fabricWorkspaceId", required=False)
         if self._is_placeholder(ws_id):
-            ok, resolved_id, _ = self._run(f'fab get "{ws_path}" -q id', capture=True)
+            ok, resolved_id, _ = self._run(["fab", "get", ws_path, "-q", "id"], capture=True)
             if ok and resolved_id:
                 self._set_config_value("fabricWorkspaceId", resolved_id)
                 self.logger.write_log(f"Resolved fabricWorkspaceId: {resolved_id}", "SUCCESS")
@@ -156,6 +167,11 @@ class FabricInfraDeployment:
         if not name:
             self.logger.write_log("No lakehouse name in config — skipping.", "WARNING")
             return True
+        try:
+            name = validate_value(name, "lakehouseName")
+        except ValidationError as exc:
+            self.logger.write_log(f"Invalid fabricLakehouseName: {exc}", "ERROR")
+            return False
 
         target = f"{self.target_workspace}.Workspace/{name}.Lakehouse"
         if self._exists(target):
@@ -164,8 +180,7 @@ class FabricInfraDeployment:
             self.stats["lakehouse"]["already_exists"] += 1
             return True
 
-        cmd = f'fab create "{target}" -P enableschemas=true'
-        ok, _, _ = self._run(cmd)
+        ok, _, _ = self._run(["fab", "create", target, "-P", "enableschemas=true"])
         if ok:
             self.logger.write_log(f"Lakehouse '{name}' created.", "SUCCESS")
             self.logger.log_to_csv(action="Infra Deploy", resource_name=name,
@@ -181,27 +196,28 @@ class FabricInfraDeployment:
         return ok
 
     def _update_lakehouse_config(self, name: str):
-        """Retrieve lakehouse ID and connection string, then save them to config."""
+        """Retrieve lakehouse ID and persist it to config.
+
+        Connection strings returned by `fab get` are intentionally NOT
+        persisted to fabric_config.json: they are treated as runtime
+        secrets and remain only on the live Fabric resource.
+        """
         base = f"{self.target_workspace}.Workspace/{name}.Lakehouse"
 
-        ok_id, lh_id, _ = self._run(f'fab get "{base}" -q id', capture=True)
-        ok_cs, conn_str, _ = self._run(
-            f'fab get "{base}" -q "properties.sqlEndpointProperties.connectionString"',
-            capture=True,
-        )
+        ok_id, lh_id, _ = self._run(["fab", "get", base, "-q", "id"], capture=True)
 
         with open(self.config_path, "r", encoding="utf-8") as f:
             cfg = json.load(f)
         p = cfg.setdefault("parameters", {})
         p["fabricLakehouseId"] = {"value": lh_id if ok_id else ""}
-        p["lakehouseConnString"] = {"value": conn_str if ok_cs and conn_str else "##lakehouseConnString##"}
+        # Never write secrets back into the on-disk config file.
+        if "lakehouseConnString" in p:
+            p["lakehouseConnString"] = {"value": "##lakehouseConnString##"}
         with open(self.config_path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
 
         if ok_id:
             self.logger.write_log(f"Lakehouse ID: {lh_id}", "SUCCESS")
-        if ok_cs and conn_str:
-            self.logger.write_log(f"Connection string updated.", "SUCCESS")
 
     # ------------------------------------------------------------------
     # 2. Connection
@@ -216,13 +232,30 @@ class FabricInfraDeployment:
         if not storage or self._is_placeholder(storage) or str(storage).strip() == "":
             self.logger.write_log("No storage account configured — skipping connection.", "WARNING")
             return True
+        try:
+            storage = validate_value(storage, "storageAccount")
+        except ValidationError as exc:
+            self.logger.write_log(f"Invalid storageAccountName: {exc}", "ERROR")
+            return False
 
-        tenant = self._get_config_value("tenantName", required=False) or ""
-        env = self._get_config_value("environmentName", required=False) or ""
+        tenant_raw = self._get_config_value("tenantName", required=False) or ""
+        env_raw = self._get_config_value("environmentName", required=False) or ""
+        try:
+            tenant = validate_value(tenant_raw, "tenantName") if tenant_raw else ""
+            env = validate_value(env_raw, "environment") if env_raw else ""
+        except ValidationError as exc:
+            self.logger.write_log(f"Invalid tenant/env: {exc}", "ERROR")
+            return False
 
-        base = cc["connectionName"]
+        base = validate_value(cc["connectionName"], "connectionName")
         conn_name = f"{tenant}_{base}_{env}" if tenant and env else base
-        display = f"{tenant}_{cc.get('displayName', base)}_{env}" if tenant and env else cc.get("displayName", base)
+        display_raw = cc.get("displayName", base)
+        display = f"{tenant}_{display_raw}_{env}" if tenant and env else display_raw
+        try:
+            display = validate_value(display, "connectionName")
+        except ValidationError as exc:
+            self.logger.write_log(f"Invalid connection displayName: {exc}", "ERROR")
+            return False
 
         path = f".connections/{conn_name}.Connection"
         if self._exists(path):
@@ -232,24 +265,52 @@ class FabricInfraDeployment:
 
         cd = cc.get("connectionDetails", {})
         params = cd.get("parameters", {})
-        server = f"{storage}.{params.get('serverSuffix', 'dfs.core.windows.net')}"
+        server_suffix = params.get("serverSuffix", "dfs.core.windows.net")
+        # Tight allowlist for the suffix to avoid any injection via config.
+        if not re.match(r"^[A-Za-z0-9.\-]{1,253}$", server_suffix):
+            self.logger.write_log(f"Invalid serverSuffix: {server_suffix!r}", "ERROR")
+            return False
+        server = f"{storage}.{server_suffix}"
         cp = params.get("containerPath", "")
-        final_path = f"/{cp}" if cp else params.get("path", "/")
+        final_path_raw = f"/{cp}" if cp else params.get("path", "/")
+        try:
+            final_path = validate_value(final_path_raw, "containerPath")
+        except ValidationError as exc:
+            self.logger.write_log(f"Invalid containerPath: {exc}", "ERROR")
+            return False
 
-        cmd = (
-            f'fab create "{path}" -P '
-            f'allowConnectionUsageInGateway={str(cc.get("allowConnectionUsageInGateway", False)).lower()},'
-            f'displayName="{display}",'
-            f'connectivityType={cc.get("connectivityType")},'
-            f'connectionDetails.type={cd.get("type")},'
-            f'connectionDetails.creationMethod={cd.get("creationMethod")},'
-            f'connectionDetails.parameters.server="{server}",'
-            f'connectionDetails.parameters.path="{final_path}",'
-            f'privacyLevel={cc.get("privacyLevel")},'
-            f'credentialDetails.type={cc.get("credentialDetails", {}).get("type")}'
+        connectivity_type = str(cc.get("connectivityType", ""))
+        cd_type = str(cd.get("type", ""))
+        cd_method = str(cd.get("creationMethod", ""))
+        privacy = str(cc.get("privacyLevel", ""))
+        cred_type = str(cc.get("credentialDetails", {}).get("type", ""))
+        for label, val in (("connectivityType", connectivity_type), ("connectionDetails.type", cd_type),
+                           ("connectionDetails.creationMethod", cd_method),
+                           ("privacyLevel", privacy),
+                           ("credentialDetails.type", cred_type)):
+            if val and not re.match(r"^[A-Za-z0-9_.\-]{1,64}$", val):
+                self.logger.write_log(f"Invalid {label}: {val!r}", "ERROR")
+                return False
+
+        allow_gw = str(cc.get("allowConnectionUsageInGateway", False)).lower()
+        if allow_gw not in ("true", "false"):
+            allow_gw = "false"
+
+        # Build -P key=value pairs as a single argv element. shell=False so
+        # quoting/escaping of inner values is not required.
+        p_pairs = (
+            f"allowConnectionUsageInGateway={allow_gw},"
+            f"displayName={display},"
+            f"connectivityType={connectivity_type},"
+            f"connectionDetails.type={cd_type},"
+            f"connectionDetails.creationMethod={cd_method},"
+            f"connectionDetails.parameters.server={server},"
+            f"connectionDetails.parameters.path={final_path},"
+            f"privacyLevel={privacy},"
+            f"credentialDetails.type={cred_type}"
         )
 
-        ok, _, _ = self._run(cmd)
+        ok, _, _ = self._run(["fab", "create", path, "-P", p_pairs])
         status = "created" if ok else "failed"
         self.logger.write_log(f"Connection '{conn_name}' {status}.",
                               "SUCCESS" if ok else "ERROR")
@@ -275,31 +336,41 @@ class FabricInfraDeployment:
         if not storage or self._is_placeholder(storage) or str(storage).strip() == "":
             self.logger.write_log("No storage account configured — skipping shortcuts.", "WARNING")
             return True
+        try:
+            storage = validate_value(storage, "storageAccount")
+        except ValidationError as exc:
+            self.logger.write_log(f"Invalid storageAccountName: {exc}", "ERROR")
+            return False
 
         lh = self._get_config_value("fabricLakehouseName", required=False)
         cc = self._get_config_value("connectionConfiguration", required=False)
         if not all([lh, cc]):
             self.logger.write_log("Missing lakehouse/connection config for shortcuts — skipping.", "WARNING")
             return True
+        try:
+            lh = validate_value(lh, "lakehouseName")
+        except ValidationError as exc:
+            self.logger.write_log(f"Invalid lakehouseName: {exc}", "ERROR")
+            return False
 
-        tenant = self._get_config_value("tenantName", required=False) or ""
-        env = self._get_config_value("environmentName", required=False) or ""
-        base = cc.get("connectionName", "")
+        tenant_raw = self._get_config_value("tenantName", required=False) or ""
+        env_raw = self._get_config_value("environmentName", required=False) or ""
+        try:
+            tenant = validate_value(tenant_raw, "tenantName") if tenant_raw else ""
+            env = validate_value(env_raw, "environment") if env_raw else ""
+        except ValidationError as exc:
+            self.logger.write_log(f"Invalid tenant/env: {exc}", "ERROR")
+            return False
+
+        base = validate_value(cc.get("connectionName", ""), "connectionName")
         conn_name = f"{tenant}_{base}_{env}" if tenant and env else base
 
-        # Get connection ID (direct subprocess call — matching working version)
-        get_id_command = f'fab get ".connections/{conn_name}.Connection" -q id'
-        self.logger.write_log(f"[DEBUG] {get_id_command}", "DEBUG")
-        try:
-            result = subprocess.run(
-                get_id_command, shell=True, capture_output=True,
-                timeout=60, text=True, cwd=None,
-            )
-            conn_id = result.stdout.strip() if result.returncode == 0 and result.stdout else ""
-        except Exception:
-            conn_id = ""
-
-        if not conn_id:
+        # Get connection ID via argv (shell=False)
+        ok_cid, conn_id, _ = self._run(
+            ["fab", "get", f".connections/{conn_name}.Connection", "-q", "id"],
+            capture=True,
+        )
+        if not ok_cid or not conn_id:
             self.logger.write_log(f"Could not retrieve connection ID for '{conn_name}'.", "ERROR")
             return False
         self.logger.write_log(f"Connection ID: {conn_id}", "SUCCESS")
@@ -309,66 +380,44 @@ class FabricInfraDeployment:
         ok_count = 0
 
         for idx, sc_def in enumerate(shortcuts, 1):
-            name = sc_def["name"]
-            container = sc_def["containerName"]
+            try:
+                name = validate_value(sc_def["name"], "shortcutName")
+                container = validate_value(sc_def["containerName"], "containerPath")
+            except (KeyError, ValidationError) as exc:
+                self.logger.write_log(f"Invalid shortcut definition #{idx}: {exc}", "ERROR")
+                self.stats["shortcuts"]["failed"] += 1
+                continue
+
             sc_path = f"{self.target_workspace}.Workspace/{lh}.Lakehouse/Files/{name}.Shortcut"
 
-            # Check if shortcut already exists (direct subprocess — matching working version)
-            exists_command = f'fab exists "{sc_path}"'
-            self.logger.write_log(f"[DEBUG] {exists_command}", "DEBUG")
-            shortcut_exists = False
-            try:
-                result = subprocess.run(
-                    exists_command, shell=True, capture_output=True,
-                    timeout=60, text=True, cwd=None,
-                )
-                if result.returncode == 0:
-                    exists_output = result.stdout.strip().lower() if result.stdout else ""
-                    shortcut_exists = "true" in exists_output
-            except Exception:
-                shortcut_exists = False
-
-            if shortcut_exists:
+            if self._exists(sc_path):
                 self.logger.write_log(f"Shortcut '{name}' already exists.", "WARNING")
                 self.stats["shortcuts"]["already_exists"] += 1
                 ok_count += 1
                 continue
 
-            # Build JSON payload (exact format from working command)
-            adls_location = f"https://{storage}.dfs.core.windows.net"
-            container_subpath = f"/{container}"
+            # Build JSON payload and pass it verbatim as a single argv
+            # element. With shell=False, no quoting/escaping is required.
             shortcut_json = {
-                "location": adls_location,
-                "subpath": container_subpath,
-                "connectionId": conn_id
+                "location": f"https://{storage}.dfs.core.windows.net",
+                "subpath": f"/{container}",
+                "connectionId": conn_id,
             }
+            json_payload = json.dumps(shortcut_json)
 
-            # Convert JSON to string with escaped quotes for the inner -i argument
-            json_str = json.dumps(shortcut_json)
-            json_payload = json_str.replace('"', '\\"')
+            self.logger.write_log(
+                f"[{idx}/{len(shortcuts)}] Creating shortcut '{name}' -> /{container}...",
+                "INFO",
+            )
 
-            # Build command using PowerShell single quotes (exact working syntax)
-            # cmd /c 'fab ln "path" --type adlsGen2 -f -i "{\"...\": \"...\"}"'
-            create_command = f"cmd /c 'fab ln \"{sc_path}\" --type adlsGen2 -f -i \"{json_payload}\"'"
+            ok, _, _ = self._run(
+                ["fab", "ln", sc_path, "--type", "adlsGen2", "-f", "-i", json_payload]
+            )
 
-            self.logger.write_log(f"[{idx}/{len(shortcuts)}] Creating shortcut '{name}' -> /{container}...", "INFO")
-            self.logger.write_log(f"[DEBUG] {create_command}", "DEBUG")
-
-            # Execute via PowerShell so single quotes are interpreted correctly
-            actual_capture = self.minimal_logging
-            try:
-                r = subprocess.run(
-                    ["powershell", "-NoProfile", "-Command", create_command],
-                    capture_output=actual_capture, timeout=300, cwd=None,
-                    text=True if actual_capture else None,
-                )
-                ok = r.returncode == 0
-            except Exception as e:
-                ok = False
-                self.logger.write_log(f"  Exception: {str(e)}", "ERROR")
-
-            self.logger.write_log(f"Shortcut '{name}' {'created' if ok else 'FAILED'}.",
-                                  "SUCCESS" if ok else "ERROR")
+            self.logger.write_log(
+                f"Shortcut '{name}' {'created' if ok else 'FAILED'}.",
+                "SUCCESS" if ok else "ERROR",
+            )
             self.logger.log_to_csv(action="Infra Deploy", resource_name=name,
                                    resource_type="Shortcut",
                                    status="created" if ok else "failed",
@@ -391,10 +440,17 @@ class FabricInfraDeployment:
             self.logger.write_log("No Spark pool config — skipping.", "WARNING")
             return True
 
-        name = pc["name"]
-        node_size = pc.get("nodeSize", "Medium")
-        min_n = pc.get("autoScale.minNodeCount", 1)
-        max_n = pc.get("autoScale.maxNodeCount", 10)
+        try:
+            name = validate_value(pc["name"], "workspaceName")
+            node_size = validate_value(pc.get("nodeSize", "Medium"), "nodeSize")
+            min_n = validate_int_range(pc.get("autoScale.minNodeCount", 1), "autoScale.minNodeCount", 1, 200)
+            max_n = validate_int_range(pc.get("autoScale.maxNodeCount", 10), "autoScale.maxNodeCount", 1, 200)
+        except ValidationError as exc:
+            self.logger.write_log(f"Invalid Spark pool config: {exc}", "ERROR")
+            return False
+        if min_n > max_n:
+            self.logger.write_log("minNodeCount must be <= maxNodeCount", "ERROR")
+            return False
 
         pool_path = f"{self.target_workspace}.Workspace/.sparkpools/{name}.SparkPool"
 
@@ -404,13 +460,15 @@ class FabricInfraDeployment:
             for prop, val in [("nodeSize", node_size), ("autoScale.enabled", "True"),
                               ("autoScale.minNodeCount", str(min_n)),
                               ("autoScale.maxNodeCount", str(max_n))]:
-                self._run(f'fab set "{pool_path}" -q {prop} -i {val} -f')
+                self._run(["fab", "set", pool_path, "-q", prop, "-i", str(val), "-f"])
             self.logger.write_log(f"Spark pool '{name}' updated.", "SUCCESS")
         else:
-            cmd = (f'fab create "{pool_path}" '
-                   f'-P nodesize={node_size},autoScale.minnodecount={min_n},'
-                   f'autoScale.maxnodecount={max_n}')
-            ok, _, _ = self._run(cmd)
+            p_pairs = (
+                f"nodesize={node_size},"
+                f"autoScale.minnodecount={min_n},"
+                f"autoScale.maxnodecount={max_n}"
+            )
+            ok, _, _ = self._run(["fab", "create", pool_path, "-P", p_pairs])
             self.logger.write_log(f"Spark pool '{name}' {'created' if ok else 'FAILED'}.",
                                   "SUCCESS" if ok else "ERROR")
             if ok:
@@ -436,12 +494,18 @@ class FabricInfraDeployment:
         for key, folder in fc.items():
             if not folder:
                 continue
+            try:
+                folder = validate_value(folder, "folderName")
+            except ValidationError as exc:
+                self.logger.write_log(f"Skipping invalid folder '{key}': {exc}", "ERROR")
+                self.stats["folders"]["failed"] += 1
+                continue
             full = f"{self.target_workspace}.Workspace/{lh}.Lakehouse/Files/{folder}"
             if self._exists(full):
                 self.logger.write_log(f"Folder '{folder}' already exists.", "WARNING")
                 self.stats["folders"]["already_exists"] += 1
             else:
-                ok, _, _ = self._run(f'fab mkdir "{full}"')
+                ok, _, _ = self._run(["fab", "mkdir", full])
                 self.logger.write_log(f"Folder '{folder}' {'created' if ok else 'FAILED'}.",
                                       "SUCCESS" if ok else "ERROR")
                 if ok:
@@ -470,18 +534,25 @@ class FabricInfraDeployment:
             return True
 
         for label, obj_id, role in identities:
+            try:
+                obj_id_v = validate_value(obj_id, "guid")
+                role_v = validate_value(role, "role")
+            except ValidationError as exc:
+                self.logger.write_log(f"Skipping {label}: {exc}", "ERROR")
+                self.stats["workspace_access"]["failed"] += 1
+                continue
+
             # Check existing access
-            ok, acl_out, _ = self._run(f'fab acl list "{ws_path}"', capture=True)
-            if ok and obj_id in acl_out:
+            ok, acl_out, _ = self._run(["fab", "acl", "list", ws_path], capture=True)
+            if ok and obj_id_v in acl_out:
                 self.logger.write_log(f"{label} already has workspace access.", "WARNING")
                 self.stats["workspace_access"]["already_exists"] += 1
                 continue
 
-            cmd = f'fab acl set "{ws_path}" -I {obj_id} -R {role} -f'
-            ok, _, _ = self._run(cmd)
+            ok, _, _ = self._run(["fab", "acl", "set", ws_path, "-I", obj_id_v, "-R", role_v, "-f"])
             self.logger.write_log(
-                f"Granted {role} to {label} ({obj_id[:8]}...)." if ok
-                else f"Failed to grant {role} to {label}.",
+                f"Granted {role_v} to {label} ({obj_id_v[:8]}...)." if ok
+                else f"Failed to grant {role_v} to {label}.",
                 "SUCCESS" if ok else "ERROR",
             )
             self.logger.log_to_csv(action="Infra Deploy",

@@ -1,0 +1,40 @@
+{
+  "name": "fabric-cli-deploy",
+  "displayName": "Fabric CLI Deploy",
+  "description": "Config-driven, idempotent, one-command deployment of a Microsoft Fabric workspace — Lakehouse, Connections, Shortcuts, Spark Pools, RBAC, Notebooks, Pipelines, Semantic Models, and Reports — wrapping the FabricCLI Deployment Kit (oneinstaller.py). Invoke with /fabric-cli-deploy.",
+  "version": "1.0.0",
+  "author": "hasrikak",
+  "license": "MIT",
+  "homepage": "https://github.com/microsoft/HRDIUtilities/tree/main/FabricCLI",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/microsoft/HRDIUtilities.git",
+    "directory": "FabricCLI/Plugin/fabric-cli-deploy"
+  },
+  "keywords": [
+    "microsoft-fabric",
+    "fabric",
+    "deployment",
+    "lakehouse",
+    "onelake",
+    "notebooks",
+    "pipelines",
+    "semantic-model",
+    "power-bi",
+    "infrastructure-as-code",
+    "ms-fabric-cli",
+    "idempotent",
+    "agency-marketplace"
+  ],
+  "engines": {
+    "claude": ">=1.0",
+    "copilot": ">=1.0"
+  },
+  "skills": [
+    "skills/SKILL.md"
+  ],
+  "schemas": [
+    "schemas/fabric_config.schema.json"
+  ]
+}
+

@@ -1,0 +1,133 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://aka.ms/fabric-cli-deploy/schemas/fabric_config.schema.json",
+  "title": "Microsoft Fabric Deployment Configuration",
+  "description": "Schema for fabric_config.json consumed by oneinstaller.py via the fabric-cli-deploy skill.",
+  "type": "object",
+  "required": ["parameters"],
+  "additionalProperties": true,
+  "properties": {
+    "parameters": {
+      "type": "object",
+      "required": [
+        "fabricWorkspaceName",
+        "tenantName",
+        "environmentName"
+      ],
+      "properties": {
+        "fabricWorkspaceName": {
+          "type": "object",
+          "required": ["value"],
+          "properties": {
+            "value": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9_\\- ]+$"
+            }
+          }
+        },
+        "tenantName": {
+          "type": "object",
+          "required": ["value"],
+          "properties": { "value": { "type": "string", "minLength": 1 } }
+        },
+        "environmentName": {
+          "type": "object",
+          "required": ["value"],
+          "properties": {
+            "value": { "type": "string", "enum": ["dev", "test", "prod"] }
+          }
+        },
+        "fabricLakehouseName": {
+          "type": "object",
+          "properties": { "value": { "type": "string" } }
+        },
+        "storageAccountName": {
+          "type": "object",
+          "properties": { "value": { "type": "string" } }
+        },
+        "SPNObjectID": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$|^.*$"
+            }
+          }
+        },
+        "poolConfiguration": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "object",
+              "required": ["name", "nodeSize"],
+              "properties": {
+                "name": { "type": "string" },
+                "nodeSize": {
+                  "type": "string",
+                  "enum": ["Small", "Medium", "Large", "XLarge", "XXLarge"]
+                },
+                "autoScale": { "type": "string", "enum": ["Enabled", "Disabled"] },
+                "autoScale.minNodeCount": { "type": "integer", "minimum": 1, "maximum": 200 },
+                "autoScale.maxNodeCount": { "type": "integer", "minimum": 1, "maximum": 200 }
+              }
+            }
+          }
+        },
+        "shortcutConfiguration": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "object",
+              "properties": {
+                "shortcuts": {
+                  "type": "array",
+                  "maxItems": 30,
+                  "items": {
+                    "type": "object",
+                    "required": ["name", "containerName"],
+                    "properties": {
+                      "name": { "type": "string" },
+                      "displayName": { "type": "string" },
+                      "containerName": { "type": "string" },
+                      "subPath": { "type": "string" },
+                      "description": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "folderConfiguration": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        },
+        "connectionConfiguration": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "object",
+              "required": ["connectionName", "displayName", "connectivityType"],
+              "properties": {
+                "connectionName": { "type": "string" },
+                "displayName": { "type": "string" },
+                "connectivityType": { "type": "string" },
+                "allowConnectionUsageInGateway": { "type": "boolean" },
+                "privacyLevel": { "type": "string" },
+                "connectionDetails": { "type": "object" },
+                "credentialDetails": { "type": "object" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
