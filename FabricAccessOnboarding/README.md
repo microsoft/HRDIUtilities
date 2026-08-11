@@ -60,6 +60,7 @@ flowchart TB
 
 ```text
 FabricAccessOnboarding/
+  end-to-end-flow.md
   .github/
     instructions/
       copilot-instructions.md
